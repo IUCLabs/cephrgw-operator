@@ -1,0 +1,50 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cephrgw-operator
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ceph.unkin.net
+  resources:
+  - bucketaccesses
+  - buckets
+  - objectstoreusers
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ceph.unkin.net
+  resources:
+  - bucketaccesses/finalizers
+  - buckets/finalizers
+  - objectstoreusers/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - ceph.unkin.net
+  resources:
+  - bucketaccesses/status
+  - buckets/status
+  - objectstoreusers/status
+  verbs:
+  - get
+  - patch
+  - update

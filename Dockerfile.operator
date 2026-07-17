@@ -1,0 +1,18 @@
+FROM golang:1.25-alpine AS builder
+
+RUN apk add --no-cache git
+
+WORKDIR /build
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o cephrgw-operator ./cmd/operator
+
+FROM gcr.io/distroless/static-debian12:nonroot
+
+COPY --from=builder /build/cephrgw-operator /usr/local/bin/cephrgw-operator
+
+ENTRYPOINT ["cephrgw-operator"]

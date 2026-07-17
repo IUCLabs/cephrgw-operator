@@ -1,0 +1,13 @@
+# The owner of a bucket. The operator creates an RGW user and writes its
+# access/secret key pair into the Secret "app-owner-rgw".
+apiVersion: ceph.unkin.net/v1alpha1
+kind: ObjectStoreUser
+metadata:
+  name: app-owner
+  namespace: default
+spec:
+  displayName: "Application bucket owner"
+  maxBuckets: 50
+  quota:
+    enabled: true
+    maxSizeBytes: 107374182400 # 100 GiB

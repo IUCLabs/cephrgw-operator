@@ -1,0 +1,16 @@
+# A bucket owned by the app-owner user, with versioning enabled.
+apiVersion: ceph.unkin.net/v1alpha1
+kind: Bucket
+metadata:
+  name: app-data
+  namespace: default
+spec:
+  bucketName: app-data
+  ownerRef: app-owner
+  versioning: true
+  tags:
+    team: platform
+    env: prod
+  # By default the operator deletes the (empty) bucket when this object is
+  # removed. Set retainOnDelete: true to keep it, or purgeOnDelete: true to
+  # delete it together with all objects.

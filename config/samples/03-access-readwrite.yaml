@@ -1,0 +1,34 @@
+# Read-write credentials for the bucket, delivered to a dedicated user and
+# Secret "app-data-rw-rgw". The owner (app-owner) always retains full control;
+# this grant is for a separate workload that needs to read and write objects
+# but must not manage the bucket itself.
+apiVersion: ceph.unkin.net/v1alpha1
+kind: BucketAccess
+metadata:
+  name: app-data-rw
+  namespace: default
+spec:
+  bucketRef: app-data
+  level: read-write
+  secretName: app-data-rw-rgw
+---
+# Alternatively, grant an *existing* ObjectStoreUser access to the bucket by
+# name. Here no user or Secret is created; the shared user's own credential
+# Secret is used, and the bucket policy is extended to include it.
+apiVersion: ceph.unkin.net/v1alpha1
+kind: ObjectStoreUser
+metadata:
+  name: analytics
+  namespace: default
+spec:
+  displayName: "Analytics pipeline"
+---
+apiVersion: ceph.unkin.net/v1alpha1
+kind: BucketAccess
+metadata:
+  name: app-data-analytics
+  namespace: default
+spec:
+  bucketRef: app-data
+  level: read-only
+  userRef: analytics
