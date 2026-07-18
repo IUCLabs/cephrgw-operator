@@ -1,0 +1,13 @@
+# Read-only credentials for the bucket. Because no userRef is given, the
+# operator provisions a dedicated RGW user for this grant and writes its keys
+# into the Secret "app-data-ro-rgw". The Bucket's S3 policy is updated to grant
+# this user GetObject/ListBucket only.
+apiVersion: ceph.unkin.net/v1alpha1
+kind: BucketAccess
+metadata:
+  name: app-data-ro
+  namespace: default
+spec:
+  bucketRef: app-data
+  level: read-only
+  secretName: app-data-ro-rgw

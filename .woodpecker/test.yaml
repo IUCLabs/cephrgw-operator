@@ -1,0 +1,8 @@
+when:
+  - event: pull_request
+
+steps:
+  - name: test
+    image: golang:1.25
+    commands:
+      - go test -race -count=1 ./api/... ./internal/...

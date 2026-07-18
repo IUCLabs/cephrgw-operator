@@ -1,0 +1,10 @@
+when:
+  - event: pull_request
+
+steps:
+  - name: docker-build-operator
+    image: woodpeckerci/plugin-docker-buildx
+    settings:
+      repo: registry.example.com/example/cephrgw-operator
+      dockerfile: Dockerfile.operator
+      dry_run: true

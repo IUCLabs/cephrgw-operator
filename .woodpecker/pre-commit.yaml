@@ -1,0 +1,9 @@
+when:
+  - event: pull_request
+
+steps:
+  - name: pre-commit
+    image: golang:1.25
+    commands:
+      - test -z "$(gofmt -l .)"
+      - go vet ./...
