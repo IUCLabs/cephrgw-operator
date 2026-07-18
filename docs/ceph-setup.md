@@ -116,8 +116,9 @@ it via `CEPH_RGW_ENDPOINT` (see below); if unset, those keys are simply omitted.
 ## 5. Give the operator its credentials (the `cephrgw-credentials` Secret)
 
 The operator reads its configuration from environment variables, which the
-deployment sources from a Secret named **`cephrgw-credentials`** in its namespace
-(`cephrgw-system`). The Secret data keys map 1:1 to the env vars:
+deployment sources (via `envFrom`) from a Secret named **`cephrgw-credentials`**
+in its namespace (`cephrgw-system`). The Secret data keys map 1:1 to the env
+vars:
 
 | Secret key | Required | Meaning |
 |------------|----------|---------|
@@ -129,7 +130,35 @@ deployment sources from a Secret named **`cephrgw-credentials`** in its namespac
 | `CEPH_DASHBOARD_CA_FILE` | no | path to a mounted CA file (alternative to the above) |
 | `CEPH_DASHBOARD_INSECURE` | no | `"true"` to skip TLS verification (dev only) |
 
-Create it directly:
+### Primary method: Vault + VSO
+
+The Secret is not managed in GitOps; it is rendered from Vault by the Vault
+Secrets Operator (VSO). Your deployment manifests ship a `VaultAuth`
+and a `VaultStaticSecret` that authenticate with a Kubernetes
+auth role and render the KV path
+`secret/cephrgw/credentials` into the
+`cephrgw-credentials` Secret. The auth role needs a policy granting read on
+that path (`secret/data/cephrgw/credentials`); beyond that **no other
+Vault setup is required** — you only seed the values:
+
+```bash
+vault kv put secret/cephrgw/credentials \
+  CEPH_DASHBOARD_URL=https://dashboard.storage.example.net \
+  CEPH_DASHBOARD_USERNAME=k8s-cephrgw-operator \
+  CEPH_DASHBOARD_PASSWORD='REPLACE-WITH-A-STRONG-PASSWORD' \
+  CEPH_RGW_ENDPOINT=https://s3.example.com
+```
+
+The keys under that KV path are copied verbatim into the Secret, so they must be
+named exactly as the table above. VSO refreshes the Secret every few minutes,
+and the deployment's `reloader.stakater.com/auto: "true"` annotation restarts the
+operator when it changes — so rotating the credential is just a new `vault kv
+put`, no manual rollout.
+
+### Fallback: a plain Secret
+
+Outside this cluster (or for a quick `kind` test) you can create the Secret
+directly instead of using Vault:
 
 ```bash
 kubectl -n cephrgw-system create secret generic cephrgw-credentials \
@@ -139,16 +168,8 @@ kubectl -n cephrgw-system create secret generic cephrgw-credentials \
   --from-literal=CEPH_RGW_ENDPOINT=https://s3.example.com
 ```
 
-The deployment carries the `reloader.stakater.com/auto: "true"` annotation, so
-rotating this Secret triggers an automatic operator restart — no manual rollout
-needed.
-
-### Sourcing it from Vault (optional)
-
-If you keep the password in Vault, sync it with a `VaultStaticSecret` (via the Vault
-Secrets Operator) that renders into `cephrgw-credentials` with
-the keys above, instead of the plain `kubectl create secret`. The operator does
-not care where the Secret comes from, only that those keys exist.
+The operator does not care where the Secret comes from, only that those keys
+exist.
 
 ---
 
