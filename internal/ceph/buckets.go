@@ -125,6 +125,26 @@ func (c *Client) SetBucketPolicy(ctx context.Context, name, bucketID, ownerUID, 
 	return err
 }
 
+// GetBucketPolicy returns the bucket's current S3 policy JSON, or "" when it has
+// none. It is signed as the bucket owner.
+func (c *Client) GetBucketPolicy(ctx context.Context, name, ownerUID string) (string, error) {
+	owner, err := c.asOwner(ctx, ownerUID)
+	if err != nil {
+		return "", err
+	}
+	out, err := c.s3.GetBucketPolicy(ctx, &s3.GetBucketPolicyInput{Bucket: aws.String(name)}, owner)
+	if err != nil {
+		if IsNotFound(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	if out.Policy == nil {
+		return "", nil
+	}
+	return *out.Policy, nil
+}
+
 // SetBucketTags replaces the bucket tag set. tagsJSON is the JSON produced by
 // BuildTagJSON (a list of {"Key","Value"} objects). bucketID is unused (kept for
 // call-site stability).

@@ -2,6 +2,7 @@ package ceph
 
 import (
 	"encoding/json"
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -14,6 +15,19 @@ const (
 	LevelReadWrite = "read-write"
 	LevelFull      = "full"
 )
+
+// managedSidPrefix marks statement ids the operator owns, so it can reconcile
+// its own statements while preserving foreign ones when adopting a bucket that
+// already has a policy. Do not reuse this prefix (or the legacy prefixes below)
+// for statements you manage yourself.
+const managedSidPrefix = "cephrgwop"
+
+// legacyManagedSidPrefixes are the statement-id prefixes the operator emitted
+// before managedSidPrefix existed; they are still recognised as operator-owned
+// so upgrading does not duplicate statements.
+var legacyManagedSidPrefixes = []string{
+	"readonlybkt", "readonlyobj", "readwritebkt", "readwriteobj", "full", "custom", "raw",
+}
 
 // GrantConditions restricts when a grant's statements apply. The zero value adds
 // no conditions.
@@ -103,10 +117,98 @@ var objectActions = map[string][]string{
 // principal its requested access. It returns "" when there are no grants so the
 // caller can clear the policy.
 func BuildBucketPolicy(bucket string, grants []Grant) (string, error) {
-	if len(grants) == 0 {
+	statements := buildStatements(bucket, grants)
+	if len(statements) == 0 {
+		return "", nil
+	}
+	b, err := json.Marshal(policyDocument{Version: "2012-10-17", Statement: statements})
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+// MergeBucketPolicy renders the operator's statements for grants and merges them
+// into an existing policy, preserving any statement the operator does not own
+// (identified by its Sid). It returns "" only when the merged policy would be
+// empty, so a bucket adopted with a hand-written policy keeps that policy.
+func MergeBucketPolicy(existing, bucket string, grants []Grant) (string, error) {
+	version := "2012-10-17"
+	var id string
+	var foreign []json.RawMessage
+
+	if strings.TrimSpace(existing) != "" {
+		var doc struct {
+			Version   string            `json:"Version"`
+			ID        string            `json:"Id,omitempty"`
+			Statement []json.RawMessage `json:"Statement"`
+		}
+		if err := json.Unmarshal([]byte(existing), &doc); err != nil {
+			return "", fmt.Errorf("parse existing bucket policy: %w", err)
+		}
+		if doc.Version != "" {
+			version = doc.Version
+		}
+		id = doc.ID
+		for _, raw := range doc.Statement {
+			var meta struct {
+				Sid string `json:"Sid"`
+			}
+			// Ignore unmarshal errors: a statement we cannot read the Sid of is
+			// treated as foreign and preserved verbatim.
+			_ = json.Unmarshal(raw, &meta)
+			if isManagedSid(meta.Sid) {
+				continue // operator-owned; re-rendered below
+			}
+			foreign = append(foreign, raw)
+		}
+	}
+
+	managed := buildStatements(bucket, grants)
+	if len(foreign) == 0 && len(managed) == 0 {
 		return "", nil
 	}
 
+	statements := make([]json.RawMessage, 0, len(foreign)+len(managed))
+	statements = append(statements, foreign...)
+	for _, st := range managed {
+		b, err := json.Marshal(st)
+		if err != nil {
+			return "", err
+		}
+		statements = append(statements, b)
+	}
+
+	b, err := json.Marshal(struct {
+		Version   string            `json:"Version"`
+		ID        string            `json:"Id,omitempty"`
+		Statement []json.RawMessage `json:"Statement"`
+	}{Version: version, ID: id, Statement: statements})
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+// isManagedSid reports whether a statement id was emitted by the operator.
+func isManagedSid(s string) bool {
+	if strings.HasPrefix(s, managedSidPrefix) {
+		return true
+	}
+	for _, p := range legacyManagedSidPrefixes {
+		if strings.HasPrefix(s, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// buildStatements renders the operator's statements for grants, sorted for
+// deterministic output.
+func buildStatements(bucket string, grants []Grant) []policyStatement {
+	if len(grants) == 0 {
+		return nil
+	}
 	sorted := make([]Grant, len(grants))
 	copy(sorted, grants)
 	sort.Slice(sorted, func(i, j int) bool {
@@ -117,17 +219,11 @@ func BuildBucketPolicy(bucket string, grants []Grant) (string, error) {
 	})
 
 	bucketARN := "arn:aws:s3:::" + bucket
-
-	doc := policyDocument{Version: "2012-10-17"}
+	var statements []policyStatement
 	for _, g := range sorted {
-		doc.Statement = append(doc.Statement, statementsForGrant(bucketARN, g)...)
+		statements = append(statements, statementsForGrant(bucketARN, g)...)
 	}
-
-	b, err := json.Marshal(doc)
-	if err != nil {
-		return "", err
-	}
-	return string(b), nil
+	return statements
 }
 
 // statementsForGrant renders the policy statements for a single grant.
@@ -138,7 +234,9 @@ func statementsForGrant(bucketARN string, g Grant) []policyStatement {
 		out := make([]policyStatement, 0, len(g.Raw))
 		for i, rs := range g.Raw {
 			st := policyStatement{
-				Sid:       firstNonEmpty(rs.Sid, sid("raw", g.UID)+strconv.Itoa(i)),
+				// Always operator-owned so a merge re-renders (not duplicates)
+				// it; any user-supplied Sid is folded into the managed id.
+				Sid:       sid(firstNonEmpty(rs.Sid, "raw"+strconv.Itoa(i)), g.UID),
 				Effect:    firstNonEmpty(rs.Effect, "Allow"),
 				Principal: principal,
 				Action:    rs.Actions,
@@ -257,9 +355,12 @@ func buildCondition(c *GrantConditions) map[string]map[string][]string {
 	return cond
 }
 
-// sid builds a policy statement id that only contains characters S3 accepts.
+// sid builds a policy statement id that only contains characters S3 accepts,
+// prefixed with managedSidPrefix so the operator can recognise its own
+// statements when merging into an adopted bucket's policy.
 func sid(prefix, uid string) string {
 	var b strings.Builder
+	b.WriteString(managedSidPrefix)
 	b.WriteString(strings.ReplaceAll(prefix, "-", ""))
 	for _, r := range uid {
 		switch {

@@ -46,6 +46,12 @@ type BucketAccessSpec struct {
 	// +optional
 	SecretName string `json:"secretName,omitempty"`
 
+	// RetainOnDelete keeps the dedicated RGW user (created when UserRef is empty)
+	// instead of deleting it when this BucketAccess is removed. Ignored when
+	// UserRef is set (that user is never managed here). Defaults to false.
+	// +optional
+	RetainOnDelete bool `json:"retainOnDelete,omitempty"`
+
 	// Paths optionally scopes object-level access to these key prefixes within
 	// the bucket; each becomes the resource "<bucket>/<prefix>*". Empty grants
 	// the whole bucket. The bucket-level ListBucket action always applies to the

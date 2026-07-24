@@ -156,6 +156,12 @@ spec:
                   - actions
                   type: object
                 type: array
+              retainOnDelete:
+                description: |-
+                  RetainOnDelete keeps the dedicated RGW user (created when UserRef is empty)
+                  instead of deleting it when this BucketAccess is removed. Ignored when
+                  UserRef is set (that user is never managed here). Defaults to false.
+                type: boolean
               secretName:
                 description: |-
                   SecretName is the Secret the operator writes credentials into for the

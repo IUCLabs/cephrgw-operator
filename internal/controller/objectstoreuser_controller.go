@@ -40,7 +40,9 @@ func (r *ObjectStoreUserReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 	if !osu.DeletionTimestamp.IsZero() {
 		if controllerutil.ContainsFinalizer(&osu, finalizer) {
-			if err := r.Ceph.DeleteUser(ctx, uid); err != nil {
+			if osu.Spec.RetainOnDelete {
+				logger.Info("retaining RGW user on delete", "uid", uid)
+			} else if err := r.Ceph.DeleteUser(ctx, uid); err != nil {
 				return r.fail(ctx, &osu, "DeleteFailed", err)
 			}
 			controllerutil.RemoveFinalizer(&osu, finalizer)
@@ -65,16 +67,30 @@ func (r *ObjectStoreUserReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		Suspended:   osu.Spec.Suspended,
 	}
 
-	if _, err := r.Ceph.GetUser(ctx, uid); ceph.IsNotFound(err) {
+	// Record adoption once: whether the RGW user already existed the first time
+	// we reconciled this resource (taken over rather than created). status.UID is
+	// only set on a successful reconcile, so it is a clean "never provisioned"
+	// signal that transient failures do not pollute.
+	firstObserve := osu.Status.UID == ""
+	_, getErr := r.Ceph.GetUser(ctx, uid)
+	switch {
+	case ceph.IsNotFound(getErr):
 		if _, err := r.Ceph.CreateUser(ctx, spec); err != nil {
 			return r.fail(ctx, &osu, "CreateFailed", err)
 		}
 		logger.Info("created RGW user", "uid", uid)
-	} else if err != nil {
-		return r.fail(ctx, &osu, "LookupFailed", err)
-	} else {
+		if firstObserve {
+			osu.Status.Adopted = false
+		}
+	case getErr != nil:
+		return r.fail(ctx, &osu, "LookupFailed", getErr)
+	default:
 		if _, err := r.Ceph.UpdateUser(ctx, spec); err != nil {
 			return r.fail(ctx, &osu, "UpdateFailed", err)
+		}
+		if firstObserve {
+			osu.Status.Adopted = true
+			logger.Info("adopted existing RGW user", "uid", uid)
 		}
 	}
 

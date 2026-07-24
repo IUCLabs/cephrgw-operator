@@ -223,6 +223,124 @@ func TestBuildBucketPolicyRawStatements(t *testing.T) {
 	}
 }
 
+func TestMergeBucketPolicyPreservesForeign(t *testing.T) {
+	// An existing policy with a foreign statement (unknown Sid, and a scalar
+	// condition value S3 allows but our typed struct does not model).
+	existing := `{"Version":"2012-10-17","Statement":[` +
+		`{"Sid":"AllowPublicRead","Effect":"Allow","Principal":"*","Action":["s3:GetObject"],` +
+		`"Resource":"arn:aws:s3:::data/public/*","Condition":{"Bool":{"aws:SecureTransport":"true"}}}]}`
+
+	merged, err := MergeBucketPolicy(existing, "data", []Grant{{UID: "reader", Level: LevelReadOnly}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	doc := parsePolicyRaw(t, merged)
+
+	var sawForeign, sawManaged bool
+	for _, raw := range doc.Statement {
+		var s struct {
+			Sid       string `json:"Sid"`
+			Condition map[string]map[string]any
+		}
+		if err := json.Unmarshal(raw, &s); err != nil {
+			t.Fatalf("statement not valid JSON: %v", err)
+		}
+		if s.Sid == "AllowPublicRead" {
+			sawForeign = true
+			// The scalar condition value must survive verbatim.
+			if v := s.Condition["Bool"]["aws:SecureTransport"]; v != "true" {
+				t.Fatalf("foreign scalar condition mangled: %v", s.Condition)
+			}
+		}
+		if isManagedSid(s.Sid) {
+			sawManaged = true
+		}
+	}
+	if !sawForeign {
+		t.Fatal("foreign statement was dropped")
+	}
+	if !sawManaged {
+		t.Fatal("operator statement missing from merge")
+	}
+}
+
+func TestMergeBucketPolicyReplacesManaged(t *testing.T) {
+	// Two rounds: an existing policy already carrying the operator's statements
+	// must not accumulate duplicates when re-merged.
+	first, err := MergeBucketPolicy("", "data", []Grant{{UID: "reader", Level: LevelReadOnly}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	second, err := MergeBucketPolicy(first, "data", []Grant{{UID: "reader", Level: LevelReadOnly}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if first != second {
+		t.Fatalf("re-merging its own policy was not idempotent:\n first=%s\nsecond=%s", first, second)
+	}
+	// A legacy (unprefixed) operator statement must also be recognised and
+	// replaced rather than preserved as foreign.
+	legacy := `{"Version":"2012-10-17","Statement":[` +
+		`{"Sid":"readonlybktreader","Effect":"Allow","Principal":{"AWS":["arn:aws:iam:::user/reader"]},` +
+		`"Action":["s3:ListBucket"],"Resource":["arn:aws:s3:::data"]}]}`
+	merged, err := MergeBucketPolicy(legacy, "data", []Grant{{UID: "reader", Level: LevelReadOnly}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, raw := range parsePolicyRaw(t, merged).Statement {
+		var s struct {
+			Sid string `json:"Sid"`
+		}
+		_ = json.Unmarshal(raw, &s)
+		if s.Sid == "readonlybktreader" {
+			t.Fatal("legacy operator statement was preserved instead of replaced")
+		}
+	}
+}
+
+func TestMergeBucketPolicyForeignOnlyKept(t *testing.T) {
+	existing := `{"Version":"2012-10-17","Statement":[` +
+		`{"Sid":"AllowPublicRead","Effect":"Allow","Principal":"*","Action":["s3:GetObject"],` +
+		`"Resource":"arn:aws:s3:::data/*"}]}`
+	// No grants: the operator adds nothing but must not wipe the foreign policy.
+	merged, err := MergeBucketPolicy(existing, "data", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if merged == "" {
+		t.Fatal("merge cleared a policy that had a foreign statement")
+	}
+	if len(parsePolicyRaw(t, merged).Statement) != 1 {
+		t.Fatalf("expected the single foreign statement, got %s", merged)
+	}
+}
+
+func TestMergeBucketPolicyEmpty(t *testing.T) {
+	merged, err := MergeBucketPolicy("", "data", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if merged != "" {
+		t.Fatalf("expected empty policy, got %q", merged)
+	}
+}
+
+// parsePolicyRaw parses a policy keeping statements as raw JSON.
+func parsePolicyRaw(t *testing.T, raw string) struct {
+	Version   string            `json:"Version"`
+	Statement []json.RawMessage `json:"Statement"`
+} {
+	t.Helper()
+	var doc struct {
+		Version   string            `json:"Version"`
+		Statement []json.RawMessage `json:"Statement"`
+	}
+	if err := json.Unmarshal([]byte(raw), &doc); err != nil {
+		t.Fatalf("policy is not valid JSON: %v\n%s", err, raw)
+	}
+	return doc
+}
+
 func TestBuildBucketPolicyFineGrainedDeterministic(t *testing.T) {
 	grants := []Grant{
 		{UID: "reader", Level: LevelReadOnly, Paths: []string{"a/", "b/"}},

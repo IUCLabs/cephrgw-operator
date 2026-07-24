@@ -1,0 +1,31 @@
+# Adopting an existing radosgw user + bucket. The operator takes them over in
+# place: no recreation, existing keys reused, existing bucket policy preserved.
+# retainOnDelete keeps the RGW objects if these CRDs are later deleted.
+# See docs/adoption.md.
+apiVersion: ceph.unkin.net/v1alpha1
+kind: ObjectStoreUser
+metadata:
+  name: legacy-owner
+  namespace: default
+spec:
+  # uid must match the existing RGW user id.
+  uid: legacy-owner
+  # Set maxBuckets to the existing user's limit (it otherwise defaults to 1000
+  # and would be applied). Leave displayName/suspended unset to keep them as-is.
+  maxBuckets: 1000
+  retainOnDelete: true
+---
+apiVersion: ceph.unkin.net/v1alpha1
+kind: Bucket
+metadata:
+  name: legacy-data
+  namespace: default
+spec:
+  # bucketName must match the existing bucket.
+  bucketName: legacy-data
+  ownerRef: legacy-owner
+  retainOnDelete: true
+  # managePolicy defaults to true: the operator merges its BucketAccess grants
+  # into the existing policy, preserving statements it does not own. Set it to
+  # false to leave the bucket policy entirely under manual control.
+  managePolicy: true

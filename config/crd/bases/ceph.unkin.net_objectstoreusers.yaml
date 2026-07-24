@@ -23,6 +23,9 @@ spec:
     - jsonPath: .status.secretName
       name: Secret
       type: string
+    - jsonPath: .status.adopted
+      name: Adopted
+      type: boolean
     - jsonPath: .status.phase
       name: Phase
       type: string
@@ -90,6 +93,12 @@ spec:
                     format: int64
                     type: integer
                 type: object
+              retainOnDelete:
+                description: |-
+                  RetainOnDelete keeps the RGW user (and its keys) when the ObjectStoreUser
+                  resource is deleted, instead of removing it. Set this before adopting an
+                  existing user you may later want to hand back. Defaults to false.
+                type: boolean
               secretName:
                 description: |-
                   SecretName is the Secret the operator writes the access/secret key into.
@@ -97,8 +106,10 @@ spec:
                   AWS_SECRET_ACCESS_KEY, BUCKET_HOST and the RGW uid.
                 type: string
               suspended:
-                description: Suspended, when true, suspends the user so its keys stop
-                  working.
+                description: |-
+                  Suspended manages the user's suspended state: true suspends the user so
+                  its keys stop working, false resumes it. When unset the operator does not
+                  touch the suspended state (useful when adopting an existing user).
                 type: boolean
               uid:
                 description: UID is the RGW user id. Defaults to metadata.name. Immutable
@@ -108,6 +119,11 @@ spec:
           status:
             description: ObjectStoreUserStatus reports observed user state.
             properties:
+              adopted:
+                description: |-
+                  Adopted reports that the RGW user already existed when the operator first
+                  reconciled this resource (it was taken over, not created).
+                type: boolean
               conditions:
                 items:
                   description: Condition contains details for one aspect of the current
