@@ -1,102 +1,73 @@
 # Ceph setup: credentials and permissions the operator needs
 
-`cephrgw-operator` never talks to RADOS or the RGW admin socket directly. It
-drives the **Ceph manager dashboard REST API** (the same API the web dashboard
-uses) at `https://dashboard.storage.example.net`. Everything below is about giving
-the operator a dashboard login with enough RGW authority, and making sure the
-dashboard itself is wired to your RGW.
+`cephrgw-operator` talks **directly to radosgw**, the same way the `radosgw-admin`
+CLI and S3 clients do — no manager dashboard involved. It uses two native Go
+libraries against the RGW endpoint (e.g. `https://rgw.example.com:443`):
 
-There are **two** credentials involved. Don't confuse them:
+- **go-ceph `rgw/admin`** → the RGW **Admin Ops API** (`/admin/user`,
+  `/admin/bucket`), signed with the operator's access/secret key, for users,
+  keys, quotas and bucket info/removal.
+- **aws-sdk-go-v2** → the **S3 API**, signed as each bucket's **owner**, for
+  bucket creation, versioning, policy, tagging and object lock.
 
-| # | Credential | Who uses it | What it is |
-|---|------------|-------------|------------|
-| 1 | Dashboard login (username + password) | the operator → `POST /api/auth` | a **dashboard account** with the `rgw-manager` role |
-| 2 | RGW admin connection | the dashboard → RGW | a **radosgw system user** (access/secret key) the dashboard is configured with |
-
-The operator only holds #1. #2 is what actually lets the dashboard create RGW
-users, buckets and bucket policies on the operator's behalf, so it must exist
-and be privileged.
+So there is exactly **one** credential to provision: a radosgw user with admin
+caps, plus its access/secret key.
 
 ---
 
-## 1. Create the dashboard login for the operator
+## 1. Create the operator's RGW admin user
 
-Create a dedicated dashboard user with the built-in **`rgw-manager`** role. That
-role grants full create/read/update/delete on the dashboard's `rgw` scope
-(users, buckets, policies) and nothing else — least privilege for this operator.
-
-```bash
-# Put the password in a file so it never lands in shell history.
-printf '%s' 'REPLACE-WITH-A-STRONG-PASSWORD' > /tmp/cephrgw.pw
-
-ceph dashboard ac-user-create k8s-cephrgw-operator -i /tmp/cephrgw.pw rgw-manager
-
-rm -f /tmp/cephrgw.pw
-```
-
-If your Ceph version wants the arguments in a different order, check
-`ceph dashboard ac-user-create -h`. To confirm the role exists and what it
-grants:
-
-```bash
-ceph dashboard ac-role-show rgw-manager
-```
-
-> Prefer `rgw-manager` over `administrator`. The operator only needs RGW
-> authority; giving it full dashboard admin is unnecessary blast radius.
-
-## 2. Make sure the dashboard can manage RGW
-
-The dashboard performs RGW operations through a **radosgw system user**. On
-recent Ceph (Pacific and later) the mgr/dashboard module usually auto-discovers
-and configures this. Verify it first:
-
-```bash
-ceph dashboard get-rgw-api-access-key   # should print a key, not empty
-```
-
-If it is empty, create a system user and point the dashboard at it:
+Create a dedicated radosgw user and give it the admin caps the operator needs.
+Only `users` and `buckets` caps are required (the operator never reads usage or
+metadata endpoints):
 
 ```bash
 radosgw-admin user create \
-  --uid=dashboard \
-  --display-name="Ceph Dashboard" \
-  --system
+  --uid=cephrgw-operator \
+  --display-name="cephrgw-operator" \
+  --caps="users=*;buckets=*"
 
-# Feed the returned keys to the dashboard.
-radosgw-admin user info --uid=dashboard \
-  | jq -r '.keys[0].access_key' > /tmp/ak
-radosgw-admin user info --uid=dashboard \
-  | jq -r '.keys[0].secret_key' > /tmp/sk
-
-ceph dashboard set-rgw-api-access-key -i /tmp/ak
-ceph dashboard set-rgw-api-secret-key -i /tmp/sk
-rm -f /tmp/ak /tmp/sk
+# Grab its keys (these become CEPH_RGW_ACCESS_KEY / CEPH_RGW_SECRET_KEY):
+radosgw-admin user info --uid=cephrgw-operator \
+  | jq -r '.keys[0] | .access_key, .secret_key'
 ```
 
-A `--system` user has the admin caps the dashboard needs to create/delete RGW
-users and buckets and to set bucket policies on any bucket. If you would rather
-not use `--system`, grant an equivalent admin cap set instead:
+If the user already exists, add the caps instead:
 
 ```bash
-radosgw-admin caps add --uid=dashboard \
-  --caps="users=*;buckets=*;metadata=*;usage=read;zone=read"
+radosgw-admin caps add --uid=cephrgw-operator --caps="users=*;buckets=*"
 ```
 
-If the dashboard reaches RGW over TLS with a private CA, you may also need:
+> `users=*;buckets=*` lets the operator create/read/delete RGW users and read/
+> remove buckets through the Admin Ops API. Bucket **creation** and all bucket
+> sub-resources (versioning, policy, tagging, object lock) go over the S3 API
+> signed as the bucket owner, so they need no extra admin cap — every RGW user
+> can manage its own buckets. The `--system` flag is **not** required.
+
+## 2. Admin Ops API must be enabled on radosgw
+
+The Admin Ops API is served by radosgw at the `admin` resource and is enabled by
+default. If your deployment has trimmed `rgw_enable_apis`, make sure it includes
+both `s3` and `admin`:
+
+```
+rgw_enable_apis = s3, admin
+```
+
+Quick check from your workstation (a `403`/`AccessDenied` still proves the
+endpoint is reachable and the API is on; a connection error means it is not):
 
 ```bash
-ceph dashboard set-rgw-api-ssl-verify true   # keep verification on in prod
+curl -sk "https://rgw.example.com:443/admin/user?format=json"
 ```
 
 ## 3. Bucket policy support (read-only / non-owner read-write)
 
-The operator enforces `read-only` and non-owner `read-write` grants by writing
-an **S3 bucket policy** through the dashboard's bucket API (the `bucket_policy`
-field on `PUT /api/rgw/bucket/{name}`). That field is available on **Ceph Reef
-18.2+ / Squid**. On older releases bucket creation and owner (`full`) access
-still work, but policy-based grants will fail — upgrade the cluster, or only use
-owner credentials, if you are pre-Reef.
+The operator enforces `read-only` and non-owner `read-write` grants by writing an
+**S3 bucket policy** (`PutBucketPolicy`). Bucket-policy support is available on
+**Ceph Reef 18.2+ / Squid**. On older releases bucket creation and owner
+(`full`) access still work, but policy-based grants will fail — upgrade the
+cluster, or only use owner credentials, if you are pre-Reef.
 
 Check your version:
 
@@ -108,27 +79,31 @@ ceph versions | jq -r '.mon | keys[]'
 
 The operator can stamp the S3 endpoint into every credential Secret it writes
 (`S3_ENDPOINT` and `BUCKET_HOST`) so applications don't have to hard-code it.
-This is the RGW/S3 endpoint your clients use — **not** the dashboard URL. Provide
-it via `CEPH_RGW_ENDPOINT` (see below); if unset, those keys are simply omitted.
+Provide it via `CEPH_RGW_ENDPOINT` (see below); if unset, those keys are simply
+omitted. This is also the default endpoint for the Admin Ops and S3 API calls
+when `CEPH_RGW_ADMIN_ENDPOINT` is not set separately.
 
 ---
 
 ## 5. Give the operator its credentials (the `cephrgw-credentials` Secret)
 
 The operator reads its configuration from environment variables, which the
-deployment sources (via `envFrom`) from a Secret named **`cephrgw-credentials`**
-in its namespace (`cephrgw-system`). The Secret data keys map 1:1 to the env
-vars:
+deployment sources from a Secret named **`cephrgw-credentials`** in its namespace
+(`cephrgw-system`). The Secret data keys map 1:1 to the env vars:
 
 | Secret key | Required | Meaning |
 |------------|----------|---------|
-| `CEPH_DASHBOARD_URL` | yes | dashboard base URL, e.g. `https://dashboard.storage.example.net` |
-| `CEPH_DASHBOARD_USERNAME` | yes | the `rgw-manager` account from step 1 |
-| `CEPH_DASHBOARD_PASSWORD` | yes | its password |
-| `CEPH_RGW_ENDPOINT` | no | S3 endpoint written into consumer Secrets |
-| `CEPH_DASHBOARD_CA` | no | PEM CA bundle to verify the dashboard TLS cert (inline) |
-| `CEPH_DASHBOARD_CA_FILE` | no | path to a mounted CA file (alternative to the above) |
-| `CEPH_DASHBOARD_INSECURE` | no | `"true"` to skip TLS verification (dev only) |
+| `CEPH_RGW_ACCESS_KEY` | yes | access key of the RGW admin user from step 1 |
+| `CEPH_RGW_SECRET_KEY` | yes | its secret key |
+| `CEPH_RGW_ENDPOINT` | see note | S3 endpoint; written into consumer Secrets and used for API calls unless `CEPH_RGW_ADMIN_ENDPOINT` is set |
+| `CEPH_RGW_ADMIN_ENDPOINT` | no | radosgw endpoint for the Admin Ops + S3 API calls, if it differs from the public `CEPH_RGW_ENDPOINT` |
+| `CEPH_RGW_REGION` | no | SigV4 credential-scope region for S3 requests (default `default`) |
+| `CEPH_RGW_CA` | no | PEM CA bundle to verify the radosgw TLS cert (inline) |
+| `CEPH_RGW_CA_FILE` | no | path to a mounted CA file (alternative to the above) |
+| `CEPH_RGW_INSECURE` | no | `"true"` to skip TLS verification (dev only) |
+
+> At least one of `CEPH_RGW_ENDPOINT` or `CEPH_RGW_ADMIN_ENDPOINT` must be set —
+> the API endpoint falls back to `CEPH_RGW_ENDPOINT` when the admin one is unset.
 
 ### Primary method: Vault + VSO
 
@@ -143,10 +118,10 @@ Vault setup is required** — you only seed the values:
 
 ```bash
 vault kv put secret/cephrgw/credentials \
-  CEPH_DASHBOARD_URL=https://dashboard.storage.example.net \
-  CEPH_DASHBOARD_USERNAME=k8s-cephrgw-operator \
-  CEPH_DASHBOARD_PASSWORD='REPLACE-WITH-A-STRONG-PASSWORD' \
-  CEPH_RGW_ENDPOINT=https://s3.example.com
+  CEPH_RGW_ENDPOINT=https://s3.example.com \
+  CEPH_RGW_ADMIN_ENDPOINT=https://rgw.example.com:443 \
+  CEPH_RGW_ACCESS_KEY='REPLACE-WITH-ACCESS-KEY' \
+  CEPH_RGW_SECRET_KEY='REPLACE-WITH-SECRET-KEY'
 ```
 
 The keys under that KV path are copied verbatim into the Secret, so they must be
@@ -162,10 +137,10 @@ directly instead of using Vault:
 
 ```bash
 kubectl -n cephrgw-system create secret generic cephrgw-credentials \
-  --from-literal=CEPH_DASHBOARD_URL=https://dashboard.storage.example.net \
-  --from-literal=CEPH_DASHBOARD_USERNAME=k8s-cephrgw-operator \
-  --from-literal=CEPH_DASHBOARD_PASSWORD='REPLACE-WITH-A-STRONG-PASSWORD' \
-  --from-literal=CEPH_RGW_ENDPOINT=https://s3.example.com
+  --from-literal=CEPH_RGW_ENDPOINT=https://s3.example.com \
+  --from-literal=CEPH_RGW_ADMIN_ENDPOINT=https://rgw.example.com:443 \
+  --from-literal=CEPH_RGW_ACCESS_KEY='REPLACE-WITH-ACCESS-KEY' \
+  --from-literal=CEPH_RGW_SECRET_KEY='REPLACE-WITH-SECRET-KEY'
 ```
 
 The operator does not care where the Secret comes from, only that those keys
@@ -175,22 +150,19 @@ exist.
 
 ## Quick verification
 
-Once the Secret and dashboard account exist, a smoke test from your workstation:
+Once the Secret and RGW admin user exist, a smoke test from your workstation
+using the operator's keys (this is the same Admin Ops call the operator's
+readiness `Ping` makes):
 
 ```bash
-# 1. Log in and capture a token.
-TOKEN=$(curl -sk -X POST https://dashboard.storage.example.net/api/auth \
-  -H 'Accept: application/vnd.ceph.api.v1.0+json' \
-  -H 'Content-Type: application/json' \
-  -d '{"username":"k8s-cephrgw-operator","password":"REPLACE-WITH-A-STRONG-PASSWORD"}' \
-  | jq -r .token)
-
-# 2. List RGW users — a 200 with a JSON array means the role + RGW wiring work.
-curl -sk https://dashboard.storage.example.net/api/rgw/user \
-  -H 'Accept: application/vnd.ceph.api.v1.0+json' \
-  -H "Authorization: Bearer $TOKEN"
+# Signing an Admin Ops request by hand is fiddly; the simplest proof is to use
+# the AWS CLI configured with the operator's keys against the S3 endpoint:
+AWS_ACCESS_KEY_ID=REPLACE-WITH-ACCESS-KEY \
+AWS_SECRET_ACCESS_KEY=REPLACE-WITH-SECRET-KEY \
+aws --endpoint-url https://s3.example.com s3 ls
 ```
 
-If step 1 fails the login/role is wrong (step 1–2 above); if step 1 works but
-step 2 returns 500/empty, the dashboard→RGW connection is not configured
-(step 2).
+A successful (even empty) listing proves the keys and endpoint work. If the
+operator logs `initial radosgw authentication failed`, the keys are wrong or the
+`admin` API is disabled (steps 1–2); if users are created but bucket policy
+grants fail, the cluster is likely pre-Reef (step 3).

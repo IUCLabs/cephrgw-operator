@@ -1,39 +1,50 @@
-// Package ceph is a small client for the Ceph manager dashboard REST API,
-// scoped to the RGW (S3) user and bucket endpoints the operator needs.
+// Package ceph is a small client for the Ceph RGW (radosgw) admin and S3 APIs,
+// scoped to the user, bucket and policy operations the operator needs.
 //
-// The dashboard authenticates with a username/password to POST /api/auth, which
-// returns a bearer (JWT) token. The client caches that token and transparently
-// re-authenticates when the server returns 401 (expired/invalid token).
+// It talks directly to radosgw (e.g. https://rgw.example.com:443) rather
+// than the manager dashboard, via two native Go libraries:
+//
+//   - github.com/ceph/go-ceph/rgw/admin drives the RGW Admin Ops API
+//     (/admin/...), signed with the operator's admin access/secret key, to
+//     manage users, keys, quotas and bucket info/removal.
+//   - github.com/aws/aws-sdk-go-v2/service/s3 drives the S3 API (/), signed as
+//     the bucket's owner, to create buckets and set versioning, tagging, policy
+//     and object lock — operations the Admin Ops API does not expose.
 package ceph
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	smithy "github.com/aws/smithy-go"
+	awshttp "github.com/aws/smithy-go/transport/http"
+	"github.com/ceph/go-ceph/rgw/admin"
 )
 
-// defaultAccept is the versioned media type the Ceph dashboard requires on its
-// RGW endpoints. The dashboard rejects requests without a matching version.
-const defaultAccept = "application/vnd.ceph.api.v1.0+json"
-
-// Config configures a dashboard Client.
+// Config configures a Client.
 type Config struct {
-	// BaseURL is the dashboard root, e.g. https://dashboard.storage.example.net.
-	BaseURL string
-	// Username / Password authenticate to POST /api/auth. The account needs the
-	// rgw-manager role (or admin) on the dashboard.
-	Username string
-	Password string
-	// CACert is an optional PEM bundle used to verify the dashboard TLS cert.
+	// Endpoint is the radosgw root, e.g. https://rgw.example.com:443.
+	Endpoint string
+	// AccessKey / SecretKey are the S3 credentials of an RGW user holding the
+	// admin caps the operator needs (users=*, buckets=*).
+	AccessKey string
+	SecretKey string
+	// Region is the SigV4 credential-scope region used for S3 requests. radosgw
+	// verifies the signature against whatever region the client used, so any
+	// consistent value works; defaults to "default". (The go-ceph admin client
+	// always signs its own requests with region "default".)
+	Region string
+	// CACert is an optional PEM bundle used to verify the radosgw TLS cert.
 	CACert []byte
 	// Insecure disables TLS verification (not recommended).
 	Insecure bool
@@ -41,49 +52,80 @@ type Config struct {
 	Timeout time.Duration
 }
 
-// Client talks to the Ceph dashboard API. It is safe for concurrent use.
+// Client talks to radosgw. It is safe for concurrent use.
 type Client struct {
-	base string
-	user string
-	pass string
-	http *http.Client
+	admin  *admin.API
+	s3     *s3.Client
+	region string
 
-	mu    sync.Mutex
-	token string
+	// keyCache memoises owner uid -> S3 credentials (via the Admin Ops API) so
+	// per-owner S3 calls do not re-fetch keys on every reconcile.
+	mu       sync.Mutex
+	keyCache map[string]aws.CredentialsProvider
 }
 
-// APIError is returned for any non-2xx dashboard response.
-type APIError struct {
-	Status int
-	Method string
-	Path   string
-	Body   string
+// notFoundCodes and conflictCodes classify RGW/S3 error codes that surface only
+// as a generic smithy.APIError (i.e. not a modeled S3 error type).
+var notFoundCodes = map[string]bool{
+	"NoSuchUser": true, "NoSuchBucket": true, "NoSuchKey": true,
+	"NoSuchBucketPolicy": true, "NoSuchTagSet": true,
+	"NoSuchTagSetError": true, "NotFound": true,
 }
 
-func (e *APIError) Error() string {
-	return fmt.Sprintf("ceph dashboard %s %s: status %d: %s", e.Method, e.Path, e.Status, e.Body)
+var conflictCodes = map[string]bool{
+	"BucketAlreadyExists": true, "BucketAlreadyOwnedByYou": true, "UserAlreadyExists": true,
 }
 
-// IsNotFound reports whether err is a 404 from the dashboard.
+// IsNotFound reports whether err represents a missing user, bucket, key, policy
+// or tag set, on either the admin or the S3 path.
 func IsNotFound(err error) bool {
-	var a *APIError
-	return errors.As(err, &a) && a.Status == http.StatusNotFound
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, admin.ErrNoSuchUser) || errors.Is(err, admin.ErrNoSuchBucket) ||
+		errors.Is(err, admin.ErrNoSuchKey) || errors.Is(err, admin.ErrNoSuchObject) {
+		return true
+	}
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) && notFoundCodes[apiErr.ErrorCode()] {
+		return true
+	}
+	var respErr *awshttp.ResponseError
+	if errors.As(err, &respErr) && respErr.HTTPStatusCode() == http.StatusNotFound {
+		return true
+	}
+	return false
 }
 
-// IsConflict reports whether err is a 409 from the dashboard.
+// IsConflict reports whether err represents an already-exists conflict on either
+// the admin or the S3 path.
 func IsConflict(err error) bool {
-	var a *APIError
-	return errors.As(err, &a) && a.Status == http.StatusConflict
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, admin.ErrUserExists) || errors.Is(err, admin.ErrEmailExists) ||
+		errors.Is(err, admin.ErrKeyExists) || errors.Is(err, admin.ErrBucketNotEmpty) {
+		return true
+	}
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) && conflictCodes[apiErr.ErrorCode()] {
+		return true
+	}
+	var respErr *awshttp.ResponseError
+	if errors.As(err, &respErr) && respErr.HTTPStatusCode() == http.StatusConflict {
+		return true
+	}
+	return false
 }
 
 // NewClient validates cfg and builds a Client.
 func NewClient(cfg Config) (*Client, error) {
-	base := strings.TrimRight(cfg.BaseURL, "/")
-	if base == "" {
-		return nil, fmt.Errorf("ceph: dashboard base URL is required")
+	endpoint := strings.TrimRight(cfg.Endpoint, "/")
+	if endpoint == "" {
+		return nil, fmt.Errorf("ceph: radosgw endpoint is required")
 	}
-	if cfg.Username == "" || cfg.Password == "" {
-		return nil, fmt.Errorf("ceph: dashboard username and password are required")
+	if cfg.AccessKey == "" || cfg.SecretKey == "" {
+		return nil, fmt.Errorf("ceph: radosgw admin access and secret key are required")
 	}
 
 	tlsCfg := &tls.Config{InsecureSkipVerify: cfg.Insecure} //nolint:gosec // opt-in via config
@@ -99,124 +141,84 @@ func NewClient(cfg Config) (*Client, error) {
 	if timeout == 0 {
 		timeout = 30 * time.Second
 	}
+	region := cfg.Region
+	if region == "" {
+		region = "default"
+	}
+
+	httpClient := &http.Client{
+		Timeout:   timeout,
+		Transport: &http.Transport{TLSClientConfig: tlsCfg},
+	}
+
+	adminAPI, err := admin.New(endpoint, cfg.AccessKey, cfg.SecretKey, httpClient)
+	if err != nil {
+		return nil, fmt.Errorf("ceph: build admin client: %w", err)
+	}
+
+	s3Client := s3.New(s3.Options{
+		Region:       region,
+		Credentials:  credentials.NewStaticCredentialsProvider(cfg.AccessKey, cfg.SecretKey, ""),
+		HTTPClient:   httpClient,
+		BaseEndpoint: aws.String(endpoint),
+		// radosgw serves buckets path-style, not virtual-host style.
+		UsePathStyle: true,
+		// radosgw (pre-Reef backports) rejects the SDK's default CRC32 /
+		// aws-chunked integrity protections; only send checksums when the API
+		// requires them.
+		RequestChecksumCalculation: aws.RequestChecksumCalculationWhenRequired,
+		ResponseChecksumValidation: aws.ResponseChecksumValidationWhenRequired,
+	})
 
 	return &Client{
-		base: base,
-		user: cfg.Username,
-		pass: cfg.Password,
-		http: &http.Client{
-			Timeout:   timeout,
-			Transport: &http.Transport{TLSClientConfig: tlsCfg},
-		},
+		admin:    adminAPI,
+		s3:       s3Client,
+		region:   region,
+		keyCache: map[string]aws.CredentialsProvider{},
 	}, nil
 }
 
-// do performs an authenticated request, decoding a 2xx JSON body into out (when
-// non-nil). On a 401 it drops the cached token, re-authenticates, and retries
-// once. accept overrides the Accept header version when non-empty.
-func (c *Client) do(ctx context.Context, method, path string, body, out any, accept string) error {
-	if accept == "" {
-		accept = defaultAccept
-	}
-	tok, err := c.ensureToken(ctx)
-	if err != nil {
-		return err
-	}
-	status, err := c.execute(ctx, method, path, body, accept, tok, out)
-	if status == http.StatusUnauthorized {
-		c.clearToken()
-		tok, err = c.ensureToken(ctx)
+// asOwner returns a per-call S3 option that signs the request as the RGW user
+// uid, looking up (and caching) the user's first key pair via the Admin Ops API.
+// Signing S3 sub-resource operations as the bucket owner (rather than the admin
+// user) makes the owner the bucket owner directly and keeps RGW's per-user S3
+// authorization intact.
+func (c *Client) asOwner(ctx context.Context, uid string) (func(*s3.Options), error) {
+	c.mu.Lock()
+	provider, ok := c.keyCache[uid]
+	c.mu.Unlock()
+	if !ok {
+		user, err := c.GetUser(ctx, uid)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		_, err = c.execute(ctx, method, path, body, accept, tok, out)
+		key, has := user.S3Key()
+		if !has {
+			return nil, fmt.Errorf("ceph: user %s has no S3 keys to sign bucket operations", uid)
+		}
+		provider = credentials.NewStaticCredentialsProvider(key.AccessKey, key.SecretKey, "")
+		c.mu.Lock()
+		c.keyCache[uid] = provider
+		c.mu.Unlock()
 	}
-	return err
+	return func(o *s3.Options) { o.Credentials = provider }, nil
 }
 
-func (c *Client) ensureToken(ctx context.Context) (string, error) {
+// forgetIdentity drops any cached S3 credentials for uid, e.g. after its keys
+// may have changed.
+func (c *Client) forgetIdentity(uid string) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.token != "" {
-		return c.token, nil
-	}
-	tok, err := c.login(ctx)
-	if err != nil {
-		return "", err
-	}
-	c.token = tok
-	return tok, nil
-}
-
-func (c *Client) clearToken() {
-	c.mu.Lock()
-	c.token = ""
+	delete(c.keyCache, uid)
 	c.mu.Unlock()
 }
 
-func (c *Client) login(ctx context.Context) (string, error) {
-	var out struct {
-		Token string `json:"token"`
-	}
-	payload := map[string]string{"username": c.user, "password": c.pass}
-	if _, err := c.execute(ctx, http.MethodPost, "/api/auth", payload, defaultAccept, "", &out); err != nil {
-		return "", fmt.Errorf("dashboard login failed: %w", err)
-	}
-	if out.Token == "" {
-		return "", fmt.Errorf("dashboard login returned no token")
-	}
-	return out.Token, nil
-}
-
-// execute runs a single request and returns the HTTP status. A non-2xx status
-// yields an *APIError. token is sent as a bearer when non-empty.
-func (c *Client) execute(ctx context.Context, method, path string, body any, accept, token string, out any) (int, error) {
-	var reader io.Reader
-	if body != nil {
-		b, err := json.Marshal(body)
-		if err != nil {
-			return 0, fmt.Errorf("marshal request body: %w", err)
-		}
-		reader = bytes.NewReader(b)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, method, c.base+path, reader)
-	if err != nil {
-		return 0, err
-	}
-	req.Header.Set("Accept", accept)
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
-
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return 0, err
-	}
-	defer resp.Body.Close()
-
-	data, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return resp.StatusCode, &APIError{
-			Status: resp.StatusCode,
-			Method: method,
-			Path:   path,
-			Body:   strings.TrimSpace(string(data)),
-		}
-	}
-	if out != nil && len(data) > 0 {
-		if err := json.Unmarshal(data, out); err != nil {
-			return resp.StatusCode, fmt.Errorf("decode %s %s response: %w", method, path, err)
-		}
-	}
-	return resp.StatusCode, nil
-}
-
-// Ping verifies connectivity and credentials by authenticating.
+// Ping verifies connectivity and that the admin credentials sign correctly. It
+// asks the Admin Ops API for a sentinel user: a NoSuchUser answer still proves
+// the request authenticated, so only transport/auth errors fail the check.
 func (c *Client) Ping(ctx context.Context) error {
-	_, err := c.ensureToken(ctx)
+	_, err := c.GetUser(ctx, "cephrgw-operator-ping-nonexistent")
+	if err == nil || IsNotFound(err) {
+		return nil
+	}
 	return err
 }

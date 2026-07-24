@@ -139,7 +139,8 @@ func sid(prefix, uid string) string {
 	return b.String()
 }
 
-// BuildTagJSON renders bucket tags in the JSON form the dashboard expects.
+// BuildTagJSON renders bucket tags as a {Key,Value} JSON list, the intermediate
+// form SetBucketTags parses and re-encodes into the S3 Tagging XML document.
 func BuildTagJSON(tags map[string]string) (string, error) {
 	if len(tags) == 0 {
 		return "", nil

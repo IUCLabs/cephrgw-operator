@@ -1,6 +1,8 @@
 ---
-# Dashboard credentials for local testing. Replace the values, or create the
+# radosgw admin credentials for local testing. Replace the values, or create the
 # Secret out-of-band, before applying. Keys map 1:1 to the operator env vars.
+# The access/secret key belong to an RGW user with admin caps
+# (users=*, buckets=*, metadata=read).
 apiVersion: v1
 kind: Secret
 metadata:
@@ -8,13 +10,17 @@ metadata:
   namespace: cephrgw-system
 type: Opaque
 stringData:
-  CEPH_DASHBOARD_URL: "https://dashboard.storage.example.net"
-  CEPH_DASHBOARD_USERNAME: "k8s-cephrgw-operator"
-  CEPH_DASHBOARD_PASSWORD: "change-me"
-  # Optional: the S3 endpoint written into credential Secrets for consumers.
+  # radosgw endpoint the operator talks to (Admin Ops + S3 APIs).
+  CEPH_RGW_ADMIN_ENDPOINT: "https://rgw.example.com:443"
+  CEPH_RGW_ACCESS_KEY: "change-me"
+  CEPH_RGW_SECRET_KEY: "change-me"
+  # The S3 endpoint written into credential Secrets for consumers (may be a
+  # public name that differs from the API endpoint above).
   CEPH_RGW_ENDPOINT: "https://s3.example.com"
+  # Optional: SigV4 credential-scope region (defaults to "default").
+  # CEPH_RGW_REGION: "default"
   # Optional: set to "true" to skip TLS verification (dev only).
-  # CEPH_DASHBOARD_INSECURE: "true"
+  # CEPH_RGW_INSECURE: "true"
 ---
 apiVersion: apps/v1
 kind: Deployment

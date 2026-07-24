@@ -40,19 +40,19 @@ func main() {
 
 	cephCfg, endpoint, err := cephConfigFromEnv()
 	if err != nil {
-		logger.Error(err, "invalid Ceph dashboard configuration")
+		logger.Error(err, "invalid radosgw configuration")
 		os.Exit(1)
 	}
 	cephClient, err := ceph.NewClient(cephCfg)
 	if err != nil {
-		logger.Error(err, "unable to build Ceph dashboard client")
+		logger.Error(err, "unable to build radosgw client")
 		os.Exit(1)
 	}
 	// Fail fast on obviously-broken credentials, but do not block startup on a
-	// transiently unreachable dashboard.
+	// transiently unreachable radosgw.
 	pingCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	if err := cephClient.Ping(pingCtx); err != nil {
-		logger.Error(err, "initial dashboard authentication failed; continuing and will retry per-reconcile")
+		logger.Error(err, "initial radosgw authentication failed; continuing and will retry per-reconcile")
 	}
 	cancel()
 
@@ -89,24 +89,34 @@ func main() {
 	}
 }
 
-// cephConfigFromEnv reads dashboard connection settings from the environment,
+// cephConfigFromEnv reads radosgw connection settings from the environment,
 // which the deployment sources from the cephrgw-credentials Secret.
+//
+// The operator talks to the radosgw Admin Ops and S3 APIs at
+// CEPH_RGW_ADMIN_ENDPOINT (falling back to CEPH_RGW_ENDPOINT). The returned
+// endpoint string is the S3 endpoint written into consumer credential Secrets,
+// which may differ (e.g. a public S3 name) from the API endpoint.
 func cephConfigFromEnv() (ceph.Config, string, error) {
-	cfg := ceph.Config{
-		BaseURL:  os.Getenv("CEPH_DASHBOARD_URL"),
-		Username: os.Getenv("CEPH_DASHBOARD_USERNAME"),
-		Password: os.Getenv("CEPH_DASHBOARD_PASSWORD"),
-		Insecure: os.Getenv("CEPH_DASHBOARD_INSECURE") == "true",
+	consumerEndpoint := os.Getenv("CEPH_RGW_ENDPOINT")
+	apiEndpoint := os.Getenv("CEPH_RGW_ADMIN_ENDPOINT")
+	if apiEndpoint == "" {
+		apiEndpoint = consumerEndpoint
 	}
-	if f := os.Getenv("CEPH_DASHBOARD_CA_FILE"); f != "" {
+	cfg := ceph.Config{
+		Endpoint:  apiEndpoint,
+		AccessKey: os.Getenv("CEPH_RGW_ACCESS_KEY"),
+		SecretKey: os.Getenv("CEPH_RGW_SECRET_KEY"),
+		Region:    os.Getenv("CEPH_RGW_REGION"),
+		Insecure:  os.Getenv("CEPH_RGW_INSECURE") == "true",
+	}
+	if f := os.Getenv("CEPH_RGW_CA_FILE"); f != "" {
 		b, err := os.ReadFile(f)
 		if err != nil {
 			return cfg, "", err
 		}
 		cfg.CACert = b
-	} else if inline := os.Getenv("CEPH_DASHBOARD_CA"); inline != "" {
+	} else if inline := os.Getenv("CEPH_RGW_CA"); inline != "" {
 		cfg.CACert = []byte(inline)
 	}
-	endpoint := os.Getenv("CEPH_RGW_ENDPOINT")
-	return cfg, endpoint, nil
+	return cfg, consumerEndpoint, nil
 }

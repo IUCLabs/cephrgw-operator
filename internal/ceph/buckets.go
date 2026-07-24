@@ -2,22 +2,25 @@ package ceph
 
 import (
 	"context"
-	"net/http"
-	"net/url"
-	"strconv"
+	"encoding/json"
+	"fmt"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/ceph/go-ceph/rgw/admin"
 )
 
-// BucketInfo is the subset of an RGW bucket record the operator consumes.
-// Different Ceph releases name the id/name fields slightly differently, so the
-// struct captures the known variants and Name/ID normalise them.
+// BucketInfo is the subset of an RGW bucket record the operator consumes, as
+// returned by the Admin Ops API (GET /admin/bucket).
 type BucketInfo struct {
-	Bucket string `json:"bucket"`
-	Bid    string `json:"bid"`
-	ID     string `json:"id"`
-	Owner  string `json:"owner"`
+	Bucket string
+	Bid    string
+	ID     string
+	Owner  string
 }
 
-// Name returns the bucket name regardless of the field the dashboard used.
+// Name returns the bucket name regardless of the field radosgw used.
 func (b *BucketInfo) Name() string {
 	if b.Bucket != "" {
 		return b.Bucket
@@ -40,90 +43,160 @@ type CreateBucketSpec struct {
 	LockYears       *int32
 }
 
-type createBucketRequest struct {
-	Bucket          string `json:"bucket"`
-	UID             string `json:"uid"`
-	Zonegroup       string `json:"zonegroup,omitempty"`
-	PlacementTarget string `json:"placement_target,omitempty"`
-	LockEnabled     string `json:"lock_enabled"`
-	LockMode        string `json:"lock_mode,omitempty"`
-	LockDays        string `json:"lock_retention_period_days,omitempty"`
-	LockYears       string `json:"lock_retention_period_years,omitempty"`
-}
-
-// GetBucket fetches a bucket by name, returning an *APIError with status 404
-// (see IsNotFound) when it does not exist.
+// GetBucket fetches a bucket by name via the Admin Ops API, returning an error
+// classified by IsNotFound (admin.ErrNoSuchBucket) when it does not exist.
 func (c *Client) GetBucket(ctx context.Context, name string) (*BucketInfo, error) {
-	var b BucketInfo
-	if err := c.do(ctx, http.MethodGet, "/api/rgw/bucket/"+url.PathEscape(name), nil, &b, ""); err != nil {
+	b, err := c.admin.GetBucketInfo(ctx, admin.Bucket{Bucket: name})
+	if err != nil {
 		return nil, err
 	}
-	return &b, nil
+	return &BucketInfo{Bucket: b.Bucket, ID: b.ID, Owner: b.Owner}, nil
 }
 
-// CreateBucket provisions a bucket owned by spec.OwnerUID.
+// CreateBucket provisions a bucket owned by spec.OwnerUID. The Admin Ops API
+// cannot create buckets, so the operator issues an S3 CreateBucket signed as the
+// owner (which makes the owner the bucket owner directly).
 func (c *Client) CreateBucket(ctx context.Context, spec CreateBucketSpec) (*BucketInfo, error) {
-	req := createBucketRequest{
-		Bucket:          spec.Bucket,
-		UID:             spec.OwnerUID,
-		Zonegroup:       spec.Zonegroup,
-		PlacementTarget: spec.PlacementTarget,
-		LockEnabled:     strconv.FormatBool(spec.LockEnabled),
-		LockMode:        spec.LockMode,
-	}
-	if spec.LockDays != nil {
-		req.LockDays = strconv.Itoa(int(*spec.LockDays))
-	}
-	if spec.LockYears != nil {
-		req.LockYears = strconv.Itoa(int(*spec.LockYears))
-	}
-	var b BucketInfo
-	if err := c.do(ctx, http.MethodPost, "/api/rgw/bucket", req, &b, ""); err != nil {
+	owner, err := c.asOwner(ctx, spec.OwnerUID)
+	if err != nil {
 		return nil, err
 	}
-	return &b, nil
-}
 
-type setBucketRequest struct {
-	BucketID        string  `json:"bucket_id"`
-	UID             string  `json:"uid"`
-	VersioningState *string `json:"versioning_state,omitempty"`
-	BucketPolicy    *string `json:"bucket_policy,omitempty"`
-	Tags            *string `json:"tags,omitempty"`
-}
-
-// SetBucketVersioning enables or suspends S3 versioning on a bucket.
-func (c *Client) SetBucketVersioning(ctx context.Context, name, bucketID, ownerUID string, enabled bool) error {
-	state := "Suspended"
-	if enabled {
-		state = "Enabled"
+	input := &s3.CreateBucketInput{Bucket: aws.String(spec.Bucket)}
+	if loc := locationConstraint(spec.Zonegroup, spec.PlacementTarget); loc != "" {
+		input.CreateBucketConfiguration = &s3types.CreateBucketConfiguration{
+			LocationConstraint: s3types.BucketLocationConstraint(loc),
+		}
 	}
-	req := setBucketRequest{BucketID: bucketID, UID: ownerUID, VersioningState: &state}
-	return c.do(ctx, http.MethodPut, "/api/rgw/bucket/"+url.PathEscape(name), req, nil, "")
+	if spec.LockEnabled {
+		input.ObjectLockEnabledForBucket = aws.Bool(true)
+	}
+
+	if _, err := c.s3.CreateBucket(ctx, input, owner); err != nil && !IsConflict(err) {
+		return nil, err
+	}
+
+	// Apply a default object-lock retention when requested.
+	if spec.LockEnabled && spec.LockMode != "" && (spec.LockDays != nil || spec.LockYears != nil) {
+		if err := c.setObjectLockDefault(ctx, owner, spec); err != nil {
+			return nil, err
+		}
+	}
+
+	return c.GetBucket(ctx, spec.Bucket)
 }
 
-// SetBucketPolicy replaces the S3 bucket policy. An empty policy string asks the
-// dashboard to clear it; not every release honours clearing, so callers should
-// treat a clear as best-effort.
+// SetBucketVersioning enables or suspends S3 versioning on a bucket. bucketID is
+// unused (kept for call-site stability).
+func (c *Client) SetBucketVersioning(ctx context.Context, name, bucketID, ownerUID string, enabled bool) error {
+	owner, err := c.asOwner(ctx, ownerUID)
+	if err != nil {
+		return err
+	}
+	status := s3types.BucketVersioningStatusSuspended
+	if enabled {
+		status = s3types.BucketVersioningStatusEnabled
+	}
+	_, err = c.s3.PutBucketVersioning(ctx, &s3.PutBucketVersioningInput{
+		Bucket:                  aws.String(name),
+		VersioningConfiguration: &s3types.VersioningConfiguration{Status: status},
+	}, owner)
+	return err
+}
+
+// SetBucketPolicy replaces the S3 bucket policy. An empty policy clears it.
+// bucketID is unused (kept for call-site stability).
 func (c *Client) SetBucketPolicy(ctx context.Context, name, bucketID, ownerUID, policy string) error {
-	req := setBucketRequest{BucketID: bucketID, UID: ownerUID, BucketPolicy: &policy}
-	return c.do(ctx, http.MethodPut, "/api/rgw/bucket/"+url.PathEscape(name), req, nil, "")
+	owner, err := c.asOwner(ctx, ownerUID)
+	if err != nil {
+		return err
+	}
+	if policy == "" {
+		_, err := c.s3.DeleteBucketPolicy(ctx, &s3.DeleteBucketPolicyInput{Bucket: aws.String(name)}, owner)
+		if IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	_, err = c.s3.PutBucketPolicy(ctx, &s3.PutBucketPolicyInput{
+		Bucket: aws.String(name),
+		Policy: aws.String(policy),
+	}, owner)
+	return err
 }
 
-// SetBucketTags replaces the bucket tag set. tagsJSON is the RGW/S3 tag JSON
-// (a list of {"Key","Value"} objects).
+// SetBucketTags replaces the bucket tag set. tagsJSON is the JSON produced by
+// BuildTagJSON (a list of {"Key","Value"} objects). bucketID is unused (kept for
+// call-site stability).
 func (c *Client) SetBucketTags(ctx context.Context, name, bucketID, ownerUID, tagsJSON string) error {
-	req := setBucketRequest{BucketID: bucketID, UID: ownerUID, Tags: &tagsJSON}
-	return c.do(ctx, http.MethodPut, "/api/rgw/bucket/"+url.PathEscape(name), req, nil, "")
+	owner, err := c.asOwner(ctx, ownerUID)
+	if err != nil {
+		return err
+	}
+
+	type tag struct {
+		Key   string `json:"Key"`
+		Value string `json:"Value"`
+	}
+	var tags []tag
+	if tagsJSON != "" {
+		if err := json.Unmarshal([]byte(tagsJSON), &tags); err != nil {
+			return fmt.Errorf("ceph: parse bucket tags: %w", err)
+		}
+	}
+	if len(tags) == 0 {
+		_, err := c.s3.DeleteBucketTagging(ctx, &s3.DeleteBucketTaggingInput{Bucket: aws.String(name)}, owner)
+		if IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+
+	tagSet := make([]s3types.Tag, 0, len(tags))
+	for _, t := range tags {
+		tagSet = append(tagSet, s3types.Tag{Key: aws.String(t.Key), Value: aws.String(t.Value)})
+	}
+	_, err = c.s3.PutBucketTagging(ctx, &s3.PutBucketTaggingInput{
+		Bucket:  aws.String(name),
+		Tagging: &s3types.Tagging{TagSet: tagSet},
+	}, owner)
+	return err
 }
 
-// DeleteBucket removes a bucket. When purge is true its objects are deleted too;
-// otherwise deletion of a non-empty bucket fails. A 404 is treated as success.
+// DeleteBucket removes a bucket via the Admin Ops API. When purge is true its
+// objects are deleted too. A NoSuchBucket response is treated as success.
 func (c *Client) DeleteBucket(ctx context.Context, name string, purge bool) error {
-	path := "/api/rgw/bucket/" + url.PathEscape(name) + "?purge_objects=" + strconv.FormatBool(purge)
-	err := c.do(ctx, http.MethodDelete, path, nil, nil, "")
+	err := c.admin.RemoveBucket(ctx, admin.Bucket{Bucket: name, PurgeObject: &purge})
 	if IsNotFound(err) {
 		return nil
 	}
 	return err
+}
+
+// setObjectLockDefault sets the bucket's default object-lock retention.
+func (c *Client) setObjectLockDefault(ctx context.Context, owner func(*s3.Options), spec CreateBucketSpec) error {
+	_, err := c.s3.PutObjectLockConfiguration(ctx, &s3.PutObjectLockConfigurationInput{
+		Bucket: aws.String(spec.Bucket),
+		ObjectLockConfiguration: &s3types.ObjectLockConfiguration{
+			ObjectLockEnabled: s3types.ObjectLockEnabledEnabled,
+			Rule: &s3types.ObjectLockRule{
+				DefaultRetention: &s3types.DefaultRetention{
+					Mode:  s3types.ObjectLockRetentionMode(spec.LockMode),
+					Days:  spec.LockDays,
+					Years: spec.LockYears,
+				},
+			},
+		},
+	}, owner)
+	return err
+}
+
+// locationConstraint renders the RGW LocationConstraint from a zonegroup and
+// placement target ("<zonegroup>:<placement>"), or "" for default placement.
+func locationConstraint(zonegroup, placement string) string {
+	loc := zonegroup
+	if placement != "" {
+		loc = zonegroup + ":" + placement
+	}
+	return loc
 }
