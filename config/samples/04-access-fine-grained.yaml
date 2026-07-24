@@ -1,0 +1,78 @@
+# Fine-grained grants. Each of these refines the coarse read-only/read-write/full
+# levels with prefix scoping, action overrides, conditions, or raw statements.
+
+# 1. Prefix-scoped read-write: this workload may read/write objects only under
+#    the "uploads/" and "tmp/" key prefixes (bucket-level ListBucket still spans
+#    the whole bucket).
+apiVersion: ceph.unkin.net/v1alpha1
+kind: BucketAccess
+metadata:
+  name: app-data-uploader
+  namespace: default
+spec:
+  bucketRef: app-data
+  level: read-write
+  secretName: app-data-uploader-rgw
+  paths:
+    - uploads/
+    - tmp/
+---
+# 2. Read-only from inside the cluster only: restrict the grant to a source CIDR
+#    and require TLS.
+apiVersion: ceph.unkin.net/v1alpha1
+kind: BucketAccess
+metadata:
+  name: app-data-internal-ro
+  namespace: default
+spec:
+  bucketRef: app-data
+  level: read-only
+  secretName: app-data-internal-ro-rgw
+  conditions:
+    sourceIPs:
+      - 192.0.2.0/24
+    secureTransportOnly: true
+---
+# 3. Explicit action set: grant exactly these actions instead of a level's
+#    canned set (level is still required but its actions are ignored).
+apiVersion: ceph.unkin.net/v1alpha1
+kind: BucketAccess
+metadata:
+  name: app-data-getput
+  namespace: default
+spec:
+  bucketRef: app-data
+  level: read-only
+  secretName: app-data-getput-rgw
+  actions:
+    - s3:GetObject
+    - s3:PutObject
+---
+# 4. Raw statements escape hatch: full control over the policy statement. Level,
+#    actions, paths and conditions are ignored; the operator only injects the
+#    Principal (this grant's user). Resources without an "arn:" prefix are
+#    treated as bucket-relative key prefixes.
+apiVersion: ceph.unkin.net/v1alpha1
+kind: BucketAccess
+metadata:
+  name: app-data-raw
+  namespace: default
+spec:
+  bucketRef: app-data
+  level: read-only
+  secretName: app-data-raw-rgw
+  rawStatements:
+    - effect: Allow
+      actions:
+        - s3:GetObject
+      resources:
+        - public/
+    - effect: Deny
+      actions:
+        - s3:DeleteObject
+      resources:
+        - locked/
+      conditions:
+        Bool:
+          aws:SecureTransport:
+            - "false"

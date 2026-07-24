@@ -61,10 +61,36 @@ spec:
               operator provisions a dedicated user for this grant and writes its keys into
               a Secret; otherwise it grants an existing ObjectStoreUser.
             properties:
+              actions:
+                description: |-
+                  Actions optionally overrides the S3 actions granted by Level. When set,
+                  exactly these actions are granted, on the bucket and its (optionally
+                  prefixed) objects. Ignored when RawStatements is set.
+                items:
+                  type: string
+                type: array
               bucketRef:
                 description: BucketRef names the Bucket (in this namespace) to grant
                   access to.
                 type: string
+              conditions:
+                description: |-
+                  Conditions optionally restricts when the grant applies (e.g. source IPs,
+                  TLS required). Ignored when RawStatements is set.
+                properties:
+                  secureTransportOnly:
+                    description: |-
+                      SecureTransportOnly requires the request to use TLS, via the S3
+                      aws:SecureTransport condition.
+                    type: boolean
+                  sourceIPs:
+                    description: |-
+                      SourceIPs restricts the grant to requests from these CIDRs (or single
+                      addresses), via the S3 aws:SourceIp condition.
+                    items:
+                      type: string
+                    type: array
+                type: object
               level:
                 description: Level is the access level to grant.
                 enum:
@@ -72,6 +98,65 @@ spec:
                 - read-write
                 - full
                 type: string
+              paths:
+                description: |-
+                  Paths optionally scopes object-level access to these key prefixes within
+                  the bucket; each becomes the resource "<bucket>/<prefix>*". Empty grants
+                  the whole bucket. The bucket-level ListBucket action always applies to the
+                  whole bucket. Ignored when RawStatements is set.
+                items:
+                  type: string
+                type: array
+              rawStatements:
+                description: |-
+                  RawStatements is an escape hatch for arbitrary S3 policy statements, merged
+                  into the bucket policy for this grant's principal. When set, Level,
+                  Actions, Paths and Conditions on this object are ignored; the operator only
+                  fills in the Principal (this grant's user) when a statement omits one.
+                items:
+                  description: |-
+                    PolicyStatement is a raw S3 bucket-policy statement, exposed for grants that
+                    need control beyond Level/Actions/Paths/Conditions.
+                  properties:
+                    actions:
+                      description: Actions are the S3 actions the statement covers
+                        (e.g. s3:GetObject).
+                      items:
+                        type: string
+                      type: array
+                    conditions:
+                      additionalProperties:
+                        additionalProperties:
+                          items:
+                            type: string
+                          type: array
+                        type: object
+                      description: |-
+                        Conditions is the raw S3 condition block: operator -> condition key ->
+                        values, e.g. {"IpAddress": {"aws:SourceIp": ["192.0.2.0/24"]}}.
+                      type: object
+                    effect:
+                      default: Allow
+                      description: Effect is Allow or Deny. Defaults to Allow.
+                      enum:
+                      - Allow
+                      - Deny
+                      type: string
+                    resources:
+                      description: |-
+                        Resources are S3 resource ARNs, or bucket-relative key prefixes when they
+                        do not start with "arn:". Empty means the whole bucket and its objects.
+                      items:
+                        type: string
+                      type: array
+                    sid:
+                      description: Sid is an optional statement id. The operator derives
+                        one when empty.
+                      type: string
+                  required:
+                  - actions
+                  type: object
+                type: array
               secretName:
                 description: |-
                   SecretName is the Secret the operator writes credentials into for the
@@ -463,7 +548,7 @@ spec:
           spec:
             description: |-
               ObjectStoreUserSpec defines a Ceph RGW (S3) user. The operator creates the
-              user through the Ceph dashboard API and writes its generated access/secret
+              user through the radosgw Admin Ops API and writes its generated access/secret
               key pair into a Kubernetes Secret. The key material is never stored on the
               resource itself.
             properties:
