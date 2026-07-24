@@ -1,13 +1,22 @@
 # cephrgw-operator
 
 A Kubernetes operator that provisions Ceph RGW (S3) **buckets** and **access
-keys** declaratively, driving the Ceph **manager dashboard REST API**. You
+keys** declaratively, talking **directly to radosgw** the way the CLI does. You
 describe a bucket, its owner, and who may read or write it as custom resources;
 the operator creates the RGW users and bucket, delivers the access/secret keys
 into Kubernetes Secrets, and maintains the bucket's S3 policy.
 
-It talks only to the dashboard API (e.g. `https://dashboard.storage.example.net`) —
-no RADOS access, no admin socket, no in-cluster Ceph required.
+It uses native Go libraries against radosgw (e.g.
+`https://rgw.example.com:443`) — no manager dashboard, no RADOS access,
+no admin socket, no in-cluster Ceph required:
+
+- **[go-ceph](https://github.com/ceph/go-ceph) `rgw/admin`** drives the RGW
+  **Admin Ops API** (`/admin/...`) for users, keys, quotas and bucket
+  info/removal — pure Go, no cgo.
+- **[aws-sdk-go-v2](https://github.com/aws/aws-sdk-go-v2)** drives the **S3 API**
+  for bucket creation, versioning, policy, tagging and object lock — the
+  operations the Admin Ops API does not expose. These are signed as the bucket
+  **owner**, so the owner owns the bucket directly.
 
 ## Custom resources
 
@@ -37,10 +46,10 @@ order objects are created or deleted. It watches `BucketAccess` and
 `ObjectStoreUser`, re-reconciling the bucket whenever a grant or user changes.
 
 ```
-ObjectStoreUser ──create user──▶ dashboard /api/rgw/user ──▶ Secret (AK/SK)
-Bucket          ──create bucket─▶ dashboard /api/rgw/bucket ─▶ owns S3 policy
-BucketAccess    ──ensure user───▶ dashboard /api/rgw/user ──▶ Secret (AK/SK, RW or RO)
-                        └────── enqueues Bucket ──▶ PUT bucket_policy (aggregate)
+ObjectStoreUser ──admin PUT /admin/user──────▶ Secret (AK/SK)
+Bucket          ──S3 CreateBucket (as owner)─▶ owns S3 policy
+BucketAccess    ──admin PUT /admin/user──────▶ Secret (AK/SK, RW or RO)
+                        └────── enqueues Bucket ──▶ S3 PutBucketPolicy (aggregate)
 ```
 
 ## Credential Secrets
@@ -50,7 +59,7 @@ into a workload:
 
 - `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`
 - `RGW_UID`
-- `S3_ENDPOINT`, `BUCKET_HOST` (when `CEPH_RGW_ENDPOINT` is configured)
+- `S3_ENDPOINT`, `BUCKET_HOST` (when `CEPH_RGW_ENDPOINT` is set)
 - `BUCKET_NAME` (on `BucketAccess` Secrets)
 
 Secrets are owner-referenced by the resource that produced them, so they are
@@ -58,10 +67,11 @@ garbage-collected when the resource is deleted.
 
 ## Prerequisites
 
-The operator needs a dashboard login with the `rgw-manager` role, a dashboard
-that is wired to RGW, and (for `read-only`/non-owner `read-write` grants) Ceph
-**Reef 18.2+ / Squid**. See **[docs/ceph-setup.md](docs/ceph-setup.md)** for the
-exact commands and the `cephrgw-credentials` Secret schema.
+The operator needs an RGW user with admin caps (`users=*;buckets=*`) and its
+access/secret key, the radosgw endpoint, and (for `read-only`/non-owner
+`read-write` grants) Ceph **Reef 18.2+ / Squid**. See
+**[docs/ceph-setup.md](docs/ceph-setup.md)** for the exact commands and the
+`cephrgw-credentials` Secret schema.
 
 ## Quickstart
 
@@ -104,12 +114,11 @@ with `make patch|minor|major`.
 
 ## Notes & caveats
 
-- **Policy clearing.** Removing the last `BucketAccess` asks the dashboard to
-  clear the bucket policy. Not every release honours an empty policy string; if
-  a stale policy lingers, clear it once by hand. Adding/replacing grants always
-  works.
+- **Policy clearing.** Removing the last `BucketAccess` issues an S3
+  `DeleteBucketPolicy`. A `NoSuchBucketPolicy` response is treated as already
+  clear. Adding/replacing grants always works.
 - **Per-bucket quota.** `Bucket.spec.quota` is applied as the owner's default
-  bucket quota via the dashboard, which is per-owner rather than strictly
+  bucket quota via the Admin Ops API, which is per-owner rather than strictly
   per-bucket. Use distinct owners if you need independent bucket quotas.
 - **Immutability.** `bucketName`, an `ObjectStoreUser`'s `uid`, and object lock
   are fixed at creation; changing them on an existing object has no effect.

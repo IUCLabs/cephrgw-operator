@@ -5,7 +5,7 @@ import (
 )
 
 // ObjectStoreUserSpec defines a Ceph RGW (S3) user. The operator creates the
-// user through the Ceph dashboard API and writes its generated access/secret
+// user through the radosgw Admin Ops API and writes its generated access/secret
 // key pair into a Kubernetes Secret. The key material is never stored on the
 // resource itself.
 type ObjectStoreUserSpec struct {
