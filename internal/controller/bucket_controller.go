@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -176,15 +177,50 @@ func (r *BucketReconciler) collectGrants(ctx context.Context, namespace, bucketR
 		if ba.Status.UID == "" {
 			continue
 		}
-		key := ba.Status.UID + "|" + string(ba.Spec.Level)
+		g := grantFromAccess(ba.Status.UID, ba)
+		key := grantKey(g)
 		if _, dup := seen[key]; dup {
 			continue
 		}
 		seen[key] = struct{}{}
 		principals[ba.Status.UID] = struct{}{}
-		grants = append(grants, ceph.Grant{UID: ba.Status.UID, Level: string(ba.Spec.Level)})
+		grants = append(grants, g)
 	}
 	return grants, len(principals), nil
+}
+
+// grantFromAccess translates a BucketAccess spec into the ceph grant model,
+// carrying the fine-grained scoping (paths, actions, conditions, raw statements).
+func grantFromAccess(uid string, ba *v1alpha1.BucketAccess) ceph.Grant {
+	g := ceph.Grant{
+		UID:     uid,
+		Level:   string(ba.Spec.Level),
+		Paths:   ba.Spec.Paths,
+		Actions: ba.Spec.Actions,
+	}
+	if c := ba.Spec.Conditions; c != nil {
+		g.Conditions = &ceph.GrantConditions{
+			SourceIPs:           c.SourceIPs,
+			SecureTransportOnly: c.SecureTransportOnly,
+		}
+	}
+	for _, s := range ba.Spec.RawStatements {
+		g.Raw = append(g.Raw, ceph.RawStatement{
+			Sid:       s.Sid,
+			Effect:    s.Effect,
+			Actions:   s.Actions,
+			Resources: s.Resources,
+			Condition: s.Conditions,
+		})
+	}
+	return g
+}
+
+// grantKey is a stable fingerprint of a grant used to collapse duplicate
+// BucketAccess objects that would render identical policy statements.
+func grantKey(g ceph.Grant) string {
+	b, _ := json.Marshal(g)
+	return string(b)
 }
 
 func (r *BucketReconciler) pending(ctx context.Context, b *v1alpha1.Bucket, reason, msg string) (ctrl.Result, error) {

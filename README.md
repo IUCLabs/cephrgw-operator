@@ -40,6 +40,26 @@ user for that grant and writes its keys into `spec.secretName` (default
 `<name>-rgw`). If `userRef` names an existing `ObjectStoreUser`, that user's own
 credential Secret is reused and only the policy is extended.
 
+#### Fine-grained grants
+
+The level is the ergonomic default; four optional fields on `BucketAccess`
+refine it (see `config/samples/04-access-fine-grained.yaml`):
+
+- `spec.paths` — scope object access to key prefixes; each becomes the resource
+  `<bucket>/<prefix>*`. The bucket-level `ListBucket` still spans the whole
+  bucket.
+- `spec.actions` — grant exactly these S3 actions instead of the level's set (on
+  the bucket and its, optionally prefixed, objects).
+- `spec.conditions` — `sourceIPs` (an `aws:SourceIp` CIDR allowlist) and
+  `secureTransportOnly` (require TLS).
+- `spec.rawStatements` — an escape hatch of raw S3 policy statements
+  (`effect`/`actions`/`resources`/`conditions`) merged for this grant's
+  principal. When set, `level`, `actions`, `paths` and `conditions` are ignored;
+  resources without an `arn:` prefix are treated as bucket-relative key prefixes.
+
+RGW honours S3 bucket policy on **Reef 18.2+ / Squid**; condition-key support is
+a subset of AWS, so validate exotic conditions against your cluster.
+
 The `Bucket` controller renders the policy as the **union of every ready
 `BucketAccess`** that targets it, so the result is convergent regardless of the
 order objects are created or deleted. It watches `BucketAccess` and
