@@ -73,6 +73,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Advisory only: warn (never exit) if the installed CRDs are missing or
+	// predate this operator's schema, which otherwise surfaces only as opaque
+	// strict-decode failures during reconcile.
+	crdCtx, crdCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	controller.CheckCRDVersions(crdCtx, mgr.GetConfig())
+	crdCancel()
+
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		logger.Error(err, "unable to set up health check")
 		os.Exit(1)
