@@ -157,6 +157,12 @@ spec:
                   - actions
                   type: object
                 type: array
+              retainOnDelete:
+                description: |-
+                  RetainOnDelete keeps the dedicated RGW user (created when UserRef is empty)
+                  instead of deleting it when this BucketAccess is removed. Ignored when
+                  UserRef is set (that user is never managed here). Defaults to false.
+                type: boolean
               secretName:
                 description: |-
                   SecretName is the Secret the operator writes credentials into for the
@@ -290,6 +296,9 @@ spec:
     - jsonPath: .status.policyPrincipals
       name: Grants
       type: integer
+    - jsonPath: .status.adopted
+      name: Adopted
+      type: boolean
     - jsonPath: .status.phase
       name: Phase
       type: string
@@ -322,6 +331,16 @@ spec:
                 description: BucketName is the S3 bucket name. Defaults to metadata.name.
                   Immutable.
                 type: string
+              managePolicy:
+                default: true
+                description: |-
+                  ManagePolicy controls whether the operator manages the bucket's S3 policy
+                  from BucketAccess grants. When true (the default) the operator reconciles
+                  its own statements while preserving any statements it does not own, so it
+                  is safe to adopt a bucket that already has a policy. Set to false to leave
+                  the bucket policy entirely untouched (BucketAccess grants then have no
+                  effect on this bucket).
+                type: boolean
               objectLock:
                 description: ObjectLock configures S3 object lock. Enabling it forces
                   versioning on.
@@ -408,6 +427,11 @@ spec:
           status:
             description: BucketStatus reports observed bucket state.
             properties:
+              adopted:
+                description: |-
+                  Adopted reports that the RGW bucket already existed when the operator
+                  first reconciled this resource (it was taken over, not created).
+                type: boolean
               bucketID:
                 description: BucketID is the RGW internal bucket instance id.
                 type: string
@@ -519,6 +543,9 @@ spec:
     - jsonPath: .status.secretName
       name: Secret
       type: string
+    - jsonPath: .status.adopted
+      name: Adopted
+      type: boolean
     - jsonPath: .status.phase
       name: Phase
       type: string
@@ -586,6 +613,12 @@ spec:
                     format: int64
                     type: integer
                 type: object
+              retainOnDelete:
+                description: |-
+                  RetainOnDelete keeps the RGW user (and its keys) when the ObjectStoreUser
+                  resource is deleted, instead of removing it. Set this before adopting an
+                  existing user you may later want to hand back. Defaults to false.
+                type: boolean
               secretName:
                 description: |-
                   SecretName is the Secret the operator writes the access/secret key into.
@@ -593,8 +626,10 @@ spec:
                   AWS_SECRET_ACCESS_KEY, BUCKET_HOST and the RGW uid.
                 type: string
               suspended:
-                description: Suspended, when true, suspends the user so its keys stop
-                  working.
+                description: |-
+                  Suspended manages the user's suspended state: true suspends the user so
+                  its keys stop working, false resumes it. When unset the operator does not
+                  touch the suspended state (useful when adopting an existing user).
                 type: boolean
               uid:
                 description: UID is the RGW user id. Defaults to metadata.name. Immutable
@@ -604,6 +639,11 @@ spec:
           status:
             description: ObjectStoreUserStatus reports observed user state.
             properties:
+              adopted:
+                description: |-
+                  Adopted reports that the RGW user already existed when the operator first
+                  reconciled this resource (it was taken over, not created).
+                type: boolean
               conditions:
                 items:
                   description: Condition contains details for one aspect of the current

@@ -49,8 +49,9 @@ func (r *BucketAccessReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	if !ba.DeletionTimestamp.IsZero() {
 		if controllerutil.ContainsFinalizer(&ba, finalizer) {
-			// Only delete a user the operator created for this grant.
-			if managed && uid != "" {
+			// Only delete a user the operator created for this grant, and only
+			// when the grant does not ask to retain it.
+			if managed && uid != "" && !ba.Spec.RetainOnDelete {
 				if err := r.Ceph.DeleteUser(ctx, uid); err != nil {
 					return r.fail(ctx, &ba, "DeleteFailed", err)
 				}

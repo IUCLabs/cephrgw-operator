@@ -77,7 +77,11 @@ func (r *BucketReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	}
 	ownerUID := owner.Status.UID
 
-	// Ensure the bucket exists.
+	// Ensure the bucket exists. Record adoption once: whether the RGW bucket
+	// already existed the first time we reconciled this resource. status.BucketID
+	// is only set on a successful reconcile, so a Pending wait on the owner (or a
+	// transient failure) does not pollute the signal.
+	firstObserve := b.Status.BucketID == ""
 	info, err := r.Ceph.GetBucket(ctx, bucketName)
 	if ceph.IsNotFound(err) {
 		createSpec := ceph.CreateBucketSpec{
@@ -97,8 +101,14 @@ func (r *BucketReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 			return r.fail(ctx, &b, "CreateFailed", err)
 		}
 		logger.Info("created bucket", "bucket", bucketName, "owner", ownerUID)
+		if firstObserve {
+			b.Status.Adopted = false
+		}
 	} else if err != nil {
 		return r.fail(ctx, &b, "LookupFailed", err)
+	} else if firstObserve {
+		b.Status.Adopted = true
+		logger.Info("adopted existing bucket", "bucket", bucketName, "owner", ownerUID)
 	}
 	bucketID := info.InstanceID()
 
@@ -129,17 +139,28 @@ func (r *BucketReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		}
 	}
 
-	// Render and apply the aggregate S3 policy from all BucketAccess grants.
-	grants, principals, err := r.collectGrants(ctx, b.Namespace, b.Name)
-	if err != nil {
-		return r.fail(ctx, &b, "GrantsFailed", err)
-	}
-	policy, err := ceph.BuildBucketPolicy(bucketName, grants)
-	if err != nil {
-		return r.fail(ctx, &b, "PolicyBuildFailed", err)
-	}
-	if err := r.Ceph.SetBucketPolicy(ctx, bucketName, bucketID, ownerUID, policy); err != nil {
-		return r.fail(ctx, &b, "PolicyFailed", err)
+	// Render and apply the aggregate S3 policy from all BucketAccess grants,
+	// unless the bucket opts out of policy management. The merge preserves any
+	// statements the operator does not own, so an adopted bucket keeps its
+	// existing policy.
+	principals := 0
+	if managePolicy(&b) {
+		grants, p, err := r.collectGrants(ctx, b.Namespace, b.Name)
+		if err != nil {
+			return r.fail(ctx, &b, "GrantsFailed", err)
+		}
+		existing, err := r.Ceph.GetBucketPolicy(ctx, bucketName, ownerUID)
+		if err != nil {
+			return r.fail(ctx, &b, "PolicyReadFailed", err)
+		}
+		policy, err := ceph.MergeBucketPolicy(existing, bucketName, grants)
+		if err != nil {
+			return r.fail(ctx, &b, "PolicyBuildFailed", err)
+		}
+		if err := r.Ceph.SetBucketPolicy(ctx, bucketName, bucketID, ownerUID, policy); err != nil {
+			return r.fail(ctx, &b, "PolicyFailed", err)
+		}
+		principals = p
 	}
 
 	b.Status.Phase = "Ready"
@@ -221,6 +242,12 @@ func grantFromAccess(uid string, ba *v1alpha1.BucketAccess) ceph.Grant {
 func grantKey(g ceph.Grant) string {
 	b, _ := json.Marshal(g)
 	return string(b)
+}
+
+// managePolicy reports whether the operator should reconcile this bucket's S3
+// policy. A nil ManagePolicy (the CRD default) is treated as true.
+func managePolicy(b *v1alpha1.Bucket) bool {
+	return b.Spec.ManagePolicy == nil || *b.Spec.ManagePolicy
 }
 
 func (r *BucketReconciler) pending(ctx context.Context, b *v1alpha1.Bucket, reason, msg string) (ctrl.Result, error) {

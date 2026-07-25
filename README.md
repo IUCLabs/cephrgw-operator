@@ -60,6 +60,17 @@ refine it (see `config/samples/04-access-fine-grained.yaml`):
 RGW honours S3 bucket policy on **Reef 18.2+ / Squid**; condition-key support is
 a subset of AWS, so validate exotic conditions against your cluster.
 
+### Adopting existing buckets and users
+
+The operator can take over buckets/users that already exist in radosgw and hand
+them back without deleting them. In short: matching CRDs manage the resource in
+place (no recreation, keys reused, `status.adopted: true`), the bucket policy is
+**merged** so an existing hand-written policy is preserved (`spec.managePolicy:
+false` opts out entirely), and `spec.retainOnDelete` on `ObjectStoreUser` /
+`Bucket` / `BucketAccess` orphans the RGW object instead of deleting it. See
+**[docs/adoption.md](docs/adoption.md)** and
+`config/samples/05-adoption.yaml`.
+
 The `Bucket` controller renders the policy as the **union of every ready
 `BucketAccess`** that targets it, so the result is convergent regardless of the
 order objects are created or deleted. It watches `BucketAccess` and

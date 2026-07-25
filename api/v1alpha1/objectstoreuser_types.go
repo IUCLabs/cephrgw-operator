@@ -27,9 +27,11 @@ type ObjectStoreUserSpec struct {
 	// +optional
 	MaxBuckets *int32 `json:"maxBuckets,omitempty"`
 
-	// Suspended, when true, suspends the user so its keys stop working.
+	// Suspended manages the user's suspended state: true suspends the user so
+	// its keys stop working, false resumes it. When unset the operator does not
+	// touch the suspended state (useful when adopting an existing user).
 	// +optional
-	Suspended bool `json:"suspended,omitempty"`
+	Suspended *bool `json:"suspended,omitempty"`
 
 	// Quota optionally applies a user-level quota.
 	// +optional
@@ -40,6 +42,12 @@ type ObjectStoreUserSpec struct {
 	// AWS_SECRET_ACCESS_KEY, BUCKET_HOST and the RGW uid.
 	// +optional
 	SecretName string `json:"secretName,omitempty"`
+
+	// RetainOnDelete keeps the RGW user (and its keys) when the ObjectStoreUser
+	// resource is deleted, instead of removing it. Set this before adopting an
+	// existing user you may later want to hand back. Defaults to false.
+	// +optional
+	RetainOnDelete bool `json:"retainOnDelete,omitempty"`
 }
 
 // ObjectStoreUserStatus reports observed user state.
@@ -53,6 +61,10 @@ type ObjectStoreUserStatus struct {
 	// SecretName is the Secret holding the user's credentials.
 	// +optional
 	SecretName string `json:"secretName,omitempty"`
+	// Adopted reports that the RGW user already existed when the operator first
+	// reconciled this resource (it was taken over, not created).
+	// +optional
+	Adopted bool `json:"adopted,omitempty"`
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 	// +optional
@@ -66,6 +78,7 @@ type ObjectStoreUserStatus struct {
 // +kubebuilder:resource:shortName=osu
 // +kubebuilder:printcolumn:name="UID",type=string,JSONPath=`.status.uid`
 // +kubebuilder:printcolumn:name="Secret",type=string,JSONPath=`.status.secretName`
+// +kubebuilder:printcolumn:name="Adopted",type=boolean,JSONPath=`.status.adopted`
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 
 // ObjectStoreUser is a Ceph RGW S3 user whose keys are delivered into a Secret.

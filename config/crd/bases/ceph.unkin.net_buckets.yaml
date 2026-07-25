@@ -26,6 +26,9 @@ spec:
     - jsonPath: .status.policyPrincipals
       name: Grants
       type: integer
+    - jsonPath: .status.adopted
+      name: Adopted
+      type: boolean
     - jsonPath: .status.phase
       name: Phase
       type: string
@@ -58,6 +61,16 @@ spec:
                 description: BucketName is the S3 bucket name. Defaults to metadata.name.
                   Immutable.
                 type: string
+              managePolicy:
+                default: true
+                description: |-
+                  ManagePolicy controls whether the operator manages the bucket's S3 policy
+                  from BucketAccess grants. When true (the default) the operator reconciles
+                  its own statements while preserving any statements it does not own, so it
+                  is safe to adopt a bucket that already has a policy. Set to false to leave
+                  the bucket policy entirely untouched (BucketAccess grants then have no
+                  effect on this bucket).
+                type: boolean
               objectLock:
                 description: ObjectLock configures S3 object lock. Enabling it forces
                   versioning on.
@@ -144,6 +157,11 @@ spec:
           status:
             description: BucketStatus reports observed bucket state.
             properties:
+              adopted:
+                description: |-
+                  Adopted reports that the RGW bucket already existed when the operator
+                  first reconciled this resource (it was taken over, not created).
+                type: boolean
               bucketID:
                 description: BucketID is the RGW internal bucket instance id.
                 type: string

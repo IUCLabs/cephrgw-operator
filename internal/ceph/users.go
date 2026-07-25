@@ -31,13 +31,15 @@ func (u *User) S3Key() (UserKey, bool) {
 	return u.Keys[0], true
 }
 
-// UserSpec describes the desired state of an RGW user.
+// UserSpec describes the desired state of an RGW user. A nil DisplayName/
+// Suspended (empty string / nil pointer) leaves that attribute untouched on an
+// existing user, so an adopted user is not mutated unless the fields are set.
 type UserSpec struct {
 	UID         string
 	DisplayName string
 	Email       string
 	MaxBuckets  *int32
-	Suspended   bool
+	Suspended   *bool
 }
 
 // fromAdminUser converts a go-ceph admin.User into the subset the operator uses.
@@ -73,7 +75,7 @@ func (c *Client) CreateUser(ctx context.Context, spec UserSpec) (*User, error) {
 		DisplayName: firstNonEmpty(spec.DisplayName, spec.UID),
 		Email:       spec.Email,
 		MaxBuckets:  int32PtrToIntPtr(spec.MaxBuckets),
-		Suspended:   boolToIntPtr(spec.Suspended),
+		Suspended:   boolPtrToIntPtr(spec.Suspended),
 		GenerateKey: boolPtr(true),
 	})
 	if err != nil {
@@ -83,15 +85,20 @@ func (c *Client) CreateUser(ctx context.Context, spec UserSpec) (*User, error) {
 	return fromAdminUser(u), nil
 }
 
-// UpdateUser reconciles the mutable attributes of an existing RGW user.
+// UpdateUser reconciles the mutable attributes of an existing RGW user. It only
+// sends attributes the spec sets: an empty DisplayName or nil Suspended is left
+// as-is, so reconciling (or adopting) a user does not clobber those fields.
 func (c *Client) UpdateUser(ctx context.Context, spec UserSpec) (*User, error) {
-	u, err := c.admin.ModifyUser(ctx, admin.User{
-		ID:          spec.UID,
-		DisplayName: firstNonEmpty(spec.DisplayName, spec.UID),
-		Email:       spec.Email,
-		MaxBuckets:  int32PtrToIntPtr(spec.MaxBuckets),
-		Suspended:   boolToIntPtr(spec.Suspended),
-	})
+	req := admin.User{
+		ID:         spec.UID,
+		Email:      spec.Email,
+		MaxBuckets: int32PtrToIntPtr(spec.MaxBuckets),
+		Suspended:  boolPtrToIntPtr(spec.Suspended),
+	}
+	if spec.DisplayName != "" {
+		req.DisplayName = spec.DisplayName
+	}
+	u, err := c.admin.ModifyUser(ctx, req)
 	if err != nil {
 		return nil, err
 	}
@@ -156,9 +163,13 @@ func int32PtrToIntPtr(p *int32) *int {
 	return &v
 }
 
-func boolToIntPtr(b bool) *int {
+// boolPtrToIntPtr renders an optional bool as RGW's 0/1 int, or nil to omit.
+func boolPtrToIntPtr(b *bool) *int {
+	if b == nil {
+		return nil
+	}
 	v := 0
-	if b {
+	if *b {
 		v = 1
 	}
 	return &v

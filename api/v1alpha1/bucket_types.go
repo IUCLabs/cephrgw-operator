@@ -64,6 +64,16 @@ type BucketSpec struct {
 	// +optional
 	Tags map[string]string `json:"tags,omitempty"`
 
+	// ManagePolicy controls whether the operator manages the bucket's S3 policy
+	// from BucketAccess grants. When true (the default) the operator reconciles
+	// its own statements while preserving any statements it does not own, so it
+	// is safe to adopt a bucket that already has a policy. Set to false to leave
+	// the bucket policy entirely untouched (BucketAccess grants then have no
+	// effect on this bucket).
+	// +kubebuilder:default=true
+	// +optional
+	ManagePolicy *bool `json:"managePolicy,omitempty"`
+
 	// RetainOnDelete keeps the RGW bucket (and its objects) when the Bucket
 	// resource is deleted. By default the operator removes the empty bucket;
 	// it never purges objects unless PurgeOnDelete is also set.
@@ -94,6 +104,10 @@ type BucketStatus struct {
 	// BucketAccess and reflected in the bucket policy.
 	// +optional
 	PolicyPrincipals int32 `json:"policyPrincipals,omitempty"`
+	// Adopted reports that the RGW bucket already existed when the operator
+	// first reconciled this resource (it was taken over, not created).
+	// +optional
+	Adopted bool `json:"adopted,omitempty"`
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 	// +optional
@@ -108,6 +122,7 @@ type BucketStatus struct {
 // +kubebuilder:printcolumn:name="Bucket",type=string,JSONPath=`.status.bucketName`
 // +kubebuilder:printcolumn:name="Owner",type=string,JSONPath=`.status.owner`
 // +kubebuilder:printcolumn:name="Grants",type=integer,JSONPath=`.status.policyPrincipals`
+// +kubebuilder:printcolumn:name="Adopted",type=boolean,JSONPath=`.status.adopted`
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 
 // Bucket is a Ceph RGW S3 bucket.
