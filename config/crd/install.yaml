@@ -293,6 +293,9 @@ spec:
     - jsonPath: .status.owner
       name: Owner
       type: string
+    - jsonPath: .status.placementTarget
+      name: Placement
+      type: string
     - jsonPath: .status.policyPrincipals
       name: Grants
       type: integer
@@ -375,9 +378,26 @@ spec:
                   with BucketAccess objects.
                 type: string
               placementTarget:
-                description: PlacementTarget optionally selects a non-default placement
-                  target/pool.
+                description: |-
+                  PlacementTarget optionally selects the RGW placement target that backs the
+                  bucket, choosing which pools (and thus replication/erasure profile) store
+                  its data. Empty (the default) uses the owning user's default_placement, or
+                  the zonegroup default. The valid values are cluster configuration, not a
+                  fixed set; on this estate the two configured targets are
+                  "default-placement" (3x replicated) and "ec" (4+1 erasure-coded).
+
+                  Immutable: RGW chooses the placement at bucket creation (from the S3
+                  LocationConstraint) and cannot move an existing bucket between placement
+                  targets. Set it on a fresh Bucket; changing it later is rejected, and if a
+                  pre-existing bucket is on a different placement the operator reports an
+                  error instead of recreating it.
+                maxLength: 63
+                pattern: ^[a-zA-Z0-9]([a-zA-Z0-9._-]*[a-zA-Z0-9])?$
                 type: string
+                x-kubernetes-validations:
+                - message: placementTarget is immutable; RGW cannot move a bucket
+                    between placement targets
+                  rule: self == oldSelf
               purgeOnDelete:
                 description: |-
                   PurgeOnDelete deletes the bucket together with all objects it contains
@@ -418,9 +438,15 @@ spec:
                 description: Versioning enables S3 object versioning on the bucket.
                 type: boolean
               zonegroup:
-                description: Zonegroup optionally pins the bucket to a specific RGW
-                  zonegroup.
+                description: |-
+                  Zonegroup optionally pins the bucket to a specific RGW zonegroup by its
+                  api-name. Empty (the default) uses the cluster's local/master zonegroup, so
+                  PlacementTarget selection works without naming the zonegroup. Immutable:
+                  RGW resolves the zonegroup at bucket creation and cannot move it afterwards.
                 type: string
+                x-kubernetes-validations:
+                - message: zonegroup is immutable; RGW fixes it at bucket creation
+                  rule: self == oldSelf
             required:
             - ownerRef
             type: object
@@ -505,6 +531,12 @@ spec:
                 type: string
               phase:
                 description: Phase is a coarse lifecycle summary (Pending/Ready/Error).
+                type: string
+              placementTarget:
+                description: |-
+                  PlacementTarget is the placement target RGW actually stores the bucket on,
+                  read back from the live bucket. It makes placement drift (a bucket landing
+                  on a different target than spec requested) visible.
                 type: string
               policyPrincipals:
                 description: |-
