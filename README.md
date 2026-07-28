@@ -60,6 +60,43 @@ refine it (see `config/samples/04-access-fine-grained.yaml`):
 RGW honours S3 bucket policy on **Reef 18.2+ / Squid**; condition-key support is
 a subset of AWS, so validate exotic conditions against your cluster.
 
+### Placement targets
+
+`Bucket.spec.placementTarget` selects the RGW **placement target** that backs the
+bucket — i.e. which pools, and therefore which durability profile, store its
+data. The valid values are cluster configuration, not a fixed set baked into the
+operator. On this estate radosgw exposes two:
+
+- `default-placement` — 3× replicated (the cluster default).
+- `ec` — 4+1 erasure-coded (cheaper capacity, for bulk/archival data).
+
+Leaving `placementTarget` empty keeps the current behaviour: the owning user's
+`default_placement` (falling back to the zonegroup default). When set, the
+operator threads it into the S3 `CreateBucket` `LocationConstraint` as
+`<zonegroup>:<placementTarget>`; with `spec.zonegroup` empty (the default) that
+is `:<placementTarget>`, which selects the local/master zonegroup with the given
+placement — so you do not need to know the zonegroup's api-name to pick a target.
+
+```yaml
+apiVersion: ceph.unkin.net/v1alpha1
+kind: Bucket
+metadata:
+  name: raw-archive
+spec:
+  ownerRef: logarchiver
+  placementTarget: ec   # 4+1 erasure-coded pool
+```
+
+Placement is **immutable**: RGW fixes it at bucket creation and cannot move an
+existing bucket between targets. The CRD rejects changing `placementTarget` (and
+`zonegroup`) on an existing `Bucket`, and if a bucket already lives on a
+different target than the spec requests (e.g. an adopted bucket, or a value
+sneaked in around the CRD guard) the controller sets an `Error` phase with a
+`PlacementImmutable` reason rather than ever deleting and recreating it. The
+placement RGW actually stores the bucket on is reported in
+`status.placementTarget` (and the `Placement` print column), so drift is visible.
+See `config/samples/06-bucket-ec.yaml`.
+
 ### Adopting existing buckets and users
 
 The operator can take over buckets/users that already exist in radosgw and hand

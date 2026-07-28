@@ -112,6 +112,18 @@ func (r *BucketReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	}
 	bucketID := info.InstanceID()
 
+	// Placement is fixed at creation: RGW cannot move an existing bucket between
+	// placement targets. If the live bucket sits on a different target than the
+	// spec asks for (a changed spec, or an adopted bucket that predates the
+	// request), surface a clear error instead of ever deleting/recreating it. An
+	// empty PlacementTarget imposes no constraint.
+	if pc := placementConflict(b.Spec.PlacementTarget, info.PlacementRule); pc {
+		b.Status.PlacementTarget = info.PlacementRule
+		return r.fail(ctx, &b, "PlacementImmutable", fmt.Errorf(
+			"bucket %q is on placement target %q but spec requests %q; RGW cannot move a bucket between placement targets",
+			bucketName, info.PlacementRule, b.Spec.PlacementTarget))
+	}
+
 	// Versioning (forced on when object lock is enabled).
 	if b.Spec.Versioning || (b.Spec.ObjectLock != nil && b.Spec.ObjectLock.Enabled) {
 		if err := r.Ceph.SetBucketVersioning(ctx, bucketName, bucketID, ownerUID, true); err != nil {
@@ -167,6 +179,7 @@ func (r *BucketReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	b.Status.BucketName = bucketName
 	b.Status.BucketID = bucketID
 	b.Status.Owner = ownerUID
+	b.Status.PlacementTarget = info.PlacementRule
 	b.Status.PolicyPrincipals = int32(principals)
 	b.Status.ObservedGeneration = b.Generation
 	setReady(&b.Status.Conditions, b.Generation, true, "Provisioned", "bucket provisioned")
@@ -248,6 +261,17 @@ func grantKey(g ceph.Grant) string {
 // policy. A nil ManagePolicy (the CRD default) is treated as true.
 func managePolicy(b *v1alpha1.Bucket) bool {
 	return b.Spec.ManagePolicy == nil || *b.Spec.ManagePolicy
+}
+
+// placementConflict reports whether a bucket's live placement target violates
+// the spec. An empty spec placement imposes no constraint (the bucket may sit on
+// whatever default it was created with). Otherwise the live placement must match
+// exactly, since RGW cannot move a bucket between placement targets.
+func placementConflict(specPlacement, livePlacement string) bool {
+	if specPlacement == "" {
+		return false
+	}
+	return specPlacement != livePlacement
 }
 
 func (r *BucketReconciler) pending(ctx context.Context, b *v1alpha1.Bucket, reason, msg string) (ctrl.Result, error) {

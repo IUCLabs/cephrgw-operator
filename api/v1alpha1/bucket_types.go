@@ -40,11 +40,29 @@ type BucketSpec struct {
 	// with BucketAccess objects.
 	OwnerRef string `json:"ownerRef"`
 
-	// Zonegroup optionally pins the bucket to a specific RGW zonegroup.
+	// Zonegroup optionally pins the bucket to a specific RGW zonegroup by its
+	// api-name. Empty (the default) uses the cluster's local/master zonegroup, so
+	// PlacementTarget selection works without naming the zonegroup. Immutable:
+	// RGW resolves the zonegroup at bucket creation and cannot move it afterwards.
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="zonegroup is immutable; RGW fixes it at bucket creation"
 	// +optional
 	Zonegroup string `json:"zonegroup,omitempty"`
 
-	// PlacementTarget optionally selects a non-default placement target/pool.
+	// PlacementTarget optionally selects the RGW placement target that backs the
+	// bucket, choosing which pools (and thus replication/erasure profile) store
+	// its data. Empty (the default) uses the owning user's default_placement, or
+	// the zonegroup default. The valid values are cluster configuration, not a
+	// fixed set; on this estate the two configured targets are
+	// "default-placement" (3x replicated) and "ec" (4+1 erasure-coded).
+	//
+	// Immutable: RGW chooses the placement at bucket creation (from the S3
+	// LocationConstraint) and cannot move an existing bucket between placement
+	// targets. Set it on a fresh Bucket; changing it later is rejected, and if a
+	// pre-existing bucket is on a different placement the operator reports an
+	// error instead of recreating it.
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-zA-Z0-9]([a-zA-Z0-9._-]*[a-zA-Z0-9])?$`
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="placementTarget is immutable; RGW cannot move a bucket between placement targets"
 	// +optional
 	PlacementTarget string `json:"placementTarget,omitempty"`
 
@@ -100,6 +118,11 @@ type BucketStatus struct {
 	// Owner is the RGW uid that owns the bucket.
 	// +optional
 	Owner string `json:"owner,omitempty"`
+	// PlacementTarget is the placement target RGW actually stores the bucket on,
+	// read back from the live bucket. It makes placement drift (a bucket landing
+	// on a different target than spec requested) visible.
+	// +optional
+	PlacementTarget string `json:"placementTarget,omitempty"`
 	// PolicyPrincipals is the number of extra principals granted via
 	// BucketAccess and reflected in the bucket policy.
 	// +optional
@@ -121,6 +144,7 @@ type BucketStatus struct {
 // +kubebuilder:resource:shortName=bkt
 // +kubebuilder:printcolumn:name="Bucket",type=string,JSONPath=`.status.bucketName`
 // +kubebuilder:printcolumn:name="Owner",type=string,JSONPath=`.status.owner`
+// +kubebuilder:printcolumn:name="Placement",type=string,JSONPath=`.status.placementTarget`
 // +kubebuilder:printcolumn:name="Grants",type=integer,JSONPath=`.status.policyPrincipals`
 // +kubebuilder:printcolumn:name="Adopted",type=boolean,JSONPath=`.status.adopted`
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`

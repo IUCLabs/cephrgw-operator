@@ -1,0 +1,18 @@
+# A bucket placed on the erasure-coded (4+1) placement target instead of the
+# default 3x-replicated pool. Good for bulk/archival data where capacity matters
+# more than the extra replica.
+#
+# placementTarget is immutable: RGW chooses the placement at bucket creation and
+# cannot move an existing bucket between targets, so it can only be set on a
+# fresh Bucket. The operator reports the live placement in status.placementTarget.
+apiVersion: ceph.unkin.net/v1alpha1
+kind: Bucket
+metadata:
+  name: raw-archive
+  namespace: default
+spec:
+  bucketName: raw-archive
+  ownerRef: app-owner
+  # Cluster-configured placement target. On this estate: "default-placement"
+  # (3x replicated) or "ec" (4+1 erasure-coded).
+  placementTarget: ec

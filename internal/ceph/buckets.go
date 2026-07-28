@@ -18,6 +18,11 @@ type BucketInfo struct {
 	Bid    string
 	ID     string
 	Owner  string
+	// PlacementRule is the placement target RGW stores the bucket on (e.g.
+	// "default-placement" or "ec"), read from the Admin Ops bucket stats.
+	PlacementRule string
+	// Zonegroup is the RGW zonegroup id the bucket belongs to.
+	Zonegroup string
 }
 
 // Name returns the bucket name regardless of the field radosgw used.
@@ -50,7 +55,13 @@ func (c *Client) GetBucket(ctx context.Context, name string) (*BucketInfo, error
 	if err != nil {
 		return nil, err
 	}
-	return &BucketInfo{Bucket: b.Bucket, ID: b.ID, Owner: b.Owner}, nil
+	return &BucketInfo{
+		Bucket:        b.Bucket,
+		ID:            b.ID,
+		Owner:         b.Owner,
+		PlacementRule: b.PlacementRule,
+		Zonegroup:     b.Zonegroup,
+	}, nil
 }
 
 // CreateBucket provisions a bucket owned by spec.OwnerUID. The Admin Ops API
@@ -211,8 +222,14 @@ func (c *Client) setObjectLockDefault(ctx context.Context, owner func(*s3.Option
 	return err
 }
 
-// locationConstraint renders the RGW LocationConstraint from a zonegroup and
-// placement target ("<zonegroup>:<placement>"), or "" for default placement.
+// locationConstraint renders the RGW S3 CreateBucket LocationConstraint from a
+// zonegroup api-name and a placement target. RGW's S3 create-bucket handler
+// splits the value on the first ":" — the part before is the zonegroup api-name,
+// the part after is the placement target id. An empty zonegroup (the common
+// case) yields ":<placement>", which selects the local/master zonegroup with the
+// given placement, so callers need not know the zonegroup's api-name to pick a
+// placement target. Both empty yields "" (no constraint: user/zonegroup
+// default). Placement empty with a zonegroup set yields just the zonegroup.
 func locationConstraint(zonegroup, placement string) string {
 	loc := zonegroup
 	if placement != "" {
