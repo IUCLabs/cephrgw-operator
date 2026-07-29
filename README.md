@@ -177,7 +177,8 @@ kubectl apply -f hack/kind/manifests/     # edit the Secret first
 
 CI runs `pre-commit` (gofmt + vet), `test`, and a dry-run image `build`
 on pull requests; pushing a `v*` tag builds and pushes
-`registry.example.com/example/cephrgw-operator` to the container registry. Bump a release
+`registry.example.com/internal/cephrgw-operator` to the
+internal docker registry. Bump a release
 with `make patch|minor|major`.
 
 ## Notes & caveats
