@@ -5,6 +5,6 @@ steps:
   - name: docker-build-operator
     image: woodpeckerci/plugin-docker-buildx
     settings:
-      repo: registry.example.com/example/cephrgw-operator
+      repo: registry.example.com/internal/cephrgw-operator
       dockerfile: Dockerfile.operator
       dry_run: true
