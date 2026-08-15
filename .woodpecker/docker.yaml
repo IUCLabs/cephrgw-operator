@@ -4,7 +4,7 @@ when:
 
 steps:
   - name: docker-operator
-    image: woodpeckerci/plugin-docker-buildx
+    image: registry.example.com/internal/plugin-docker-buildx:latest
     settings:
       registry: registry.example.com
       repo: registry.example.com/internal/cephrgw-operator
