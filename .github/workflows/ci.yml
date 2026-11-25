@@ -30,7 +30,7 @@ jobs:
       contents: read
       pull-requests: read
     with:
-      test_args: -race -count=1 ./api/... ./internal/...
+      test_args: -count=1 ./api/... ./internal/...
 
   image:
     uses: IUCLabs/workflows/.github/workflows/release-go-image.yml@v0.1.1

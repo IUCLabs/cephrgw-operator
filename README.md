@@ -185,7 +185,7 @@ kubectl apply -f hack/kind/manifests/     # edit the Secret first
 
 ## CI and releases
 
-GitHub Actions runs pre-commit, actionlint/zizmor, `go vet`, `go test -race`
+GitHub Actions runs pre-commit, actionlint/zizmor, `go vet`, `go test`
 and a ko image build on pull requests. `make patch|minor|major` publishes a
 GitHub release and pushes its `v*` tag, which builds and pushes
 `ghcr.io/iuclabs/cephrgw-operator:<tag>` (and `latest`) with ko.
