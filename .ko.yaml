@@ -1,0 +1,6 @@
+defaultBaseImage: gcr.io/distroless/static-debian12:nonroot
+builds:
+  - id: cephrgw-operator
+    main: ./cmd/operator
+    ldflags:
+      - -s -w

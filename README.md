@@ -141,6 +141,16 @@ access/secret key, the radosgw endpoint, and (for `read-only`/non-owner
 **[docs/ceph-setup.md](docs/ceph-setup.md)** for the exact commands and the
 `cephrgw-credentials` Secret schema.
 
+## Install
+
+```sh
+kubectl apply -f https://raw.githubusercontent.com/IUCLabs/cephrgw-operator/main/config/crd/install.yaml
+```
+
+Run the operator image `ghcr.io/iuclabs/cephrgw-operator:<tag>`;
+[hack/kind/manifests/](hack/kind/manifests/) has an example Deployment and RBAC.
+Source: <https://github.com/IUCLabs/cephrgw-operator>.
+
 ## Quickstart
 
 ```sh
@@ -173,13 +183,12 @@ kubectl apply -f config/crd/bases/
 kubectl apply -f hack/kind/manifests/     # edit the Secret first
 ```
 
-## CI
+## CI and releases
 
-CI runs `pre-commit` (gofmt + vet), `test`, and a dry-run image `build`
-on pull requests; pushing a `v*` tag builds and pushes
-`registry.example.com/internal/cephrgw-operator` to the
-internal docker registry. Bump a release
-with `make patch|minor|major`.
+GitHub Actions runs pre-commit, actionlint/zizmor, `go vet`, `go test -race`
+and a ko image build on pull requests. `make patch|minor|major` publishes a
+GitHub release and pushes its `v*` tag, which builds and pushes
+`ghcr.io/iuclabs/cephrgw-operator:<tag>` (and `latest`) with ko.
 
 ## Notes & caveats
 
